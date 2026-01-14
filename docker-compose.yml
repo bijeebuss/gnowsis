@@ -112,6 +112,7 @@ services:
     command: npm run preview -- --host 0.0.0.0 --port 3000
     environment:
       NODE_ENV: ${NODE_ENV:-production}
+      VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS:-localhost}
     ports:
       - "3000:3000"
     depends_on:
