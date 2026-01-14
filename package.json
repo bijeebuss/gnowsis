@@ -10,6 +10,7 @@
     "test:watch": "vitest",
     "worker": "tsx workflows/worker.ts",
     "email-worker": "tsx workflows/email-worker.ts",
+    "combined-worker": "tsx workflows/combined-worker.ts",
     "init-email-schedule": "tsx workflows/init-email-schedule.ts",
     "api": "tsx server/app.ts",
     "temporal": "temporal server start-dev --db-filename .temporal.db",

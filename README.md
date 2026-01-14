@@ -30,7 +30,111 @@ TLDR is a full-stack document management application that allows users to upload
 - **OpenAI Vision API** for LLM-based text extraction
 - **ImageMagick** for PDF to image conversion
 
-## Prerequisites
+## Quick Start with Docker Compose
+
+The easiest way to run TLDR is with Docker Compose. All dependencies (PostgreSQL, Temporal, etc.) are included.
+
+### Prerequisites
+
+- **Docker** and **Docker Compose** (v2.0+)
+- **OpenAI API Key** (or compatible endpoint like OpenRouter)
+
+### Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd TLDR
+   ```
+
+2. **Create your environment file:**
+   ```bash
+   cp .env.docker.example .env
+   ```
+
+3. **Edit `.env`** and configure the required values:
+   ```env
+   # Required: Generate secure secrets
+   JWT_SECRET=your-secret-key-here          # openssl rand -base64 32
+   ENCRYPTION_SECRET=your-64-char-hex-key   # openssl rand -hex 32
+
+   # Required: OpenAI API for OCR
+   OPENAI_API_KEY=your-openai-api-key-here
+   OPENAI_API_ENDPOINT=https://api.openai.com/v1
+   OPENAI_MODEL=gpt-4o-mini
+
+   # Optional: Database credentials (defaults work fine)
+   DB_USER=postgres
+   DB_PASSWORD=postgres
+   DB_NAME=tldr
+   ```
+
+4. **Start the application:**
+   ```bash
+   # Start core services (app, api, workers, postgres, temporal)
+   docker compose up -d
+
+   # Or include Gotenberg for email-to-PDF conversion
+   docker compose --profile gotenberg up -d
+
+   # Or include Ollama with GPU passthrough for local LLM
+   docker compose --profile ollama up -d
+
+   # Or start everything
+   docker compose --profile full up -d
+   ```
+
+5. **Access the application:**
+   - Frontend: http://localhost:3000
+   - API: http://localhost:3001
+   - Temporal UI: http://localhost:8233
+
+### Docker Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `app` | 3000 | Frontend React application |
+| `api` | 3001 | Backend Express API |
+| `worker` | - | Document & email processing worker |
+| `postgres` | 5432 | PostgreSQL with pgvector |
+| `temporal` | 7233, 8233 | Workflow orchestration & UI |
+| `gotenberg` | 3003 | PDF conversion (optional) |
+| `ollama` | 11434 | Local LLM with GPU (optional) |
+
+### Persistent Data
+
+All data is stored in Docker volumes:
+- `tldr-postgres-data` - Database
+- `tldr-temporal-data` - Workflow state
+- `tldr-uploads-data` - Uploaded documents
+- `tldr-ollama-data` - Ollama models (if enabled)
+
+To backup or migrate data:
+```bash
+# List volumes
+docker volume ls | grep tldr
+
+# Backup uploads
+docker run --rm -v tldr-uploads-data:/data -v $(pwd):/backup alpine tar czf /backup/uploads-backup.tar.gz /data
+```
+
+### Stopping and Cleanup
+
+```bash
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (WARNING: deletes all data)
+docker compose down -v
+```
+
+---
+
+## Manual Installation (Without Docker)
+
+If you prefer to run services manually, follow the instructions below.
+
+### Prerequisites
 
 Before you begin, ensure you have the following installed:
 

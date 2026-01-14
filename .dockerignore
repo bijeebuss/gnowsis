@@ -1,0 +1,41 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+
+# Git
+.git
+.gitignore
+
+# Environment files (should be passed via docker-compose)
+.env
+.env.local
+.env.*.local
+
+# Development files
+.temporal.db
+*.log
+*.tmp
+
+# Uploads (mounted as volume)
+uploads/*
+!uploads/.gitkeep
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# Docker files (no need to copy these into the image)
+docker-compose*.yml
+.dockerignore
