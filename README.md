@@ -85,16 +85,14 @@ The easiest way to run TLDR is with Docker Compose. All dependencies (PostgreSQL
    ```
 
 5. **Access the application:**
-   - Frontend: http://localhost:3000
-   - API: http://localhost:3001
+   - Application: http://localhost:3000
    - Temporal UI: http://localhost:8233
 
 ### Docker Services
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `app` | 3000 | Frontend React application |
-| `api` | 3001 | Backend Express API |
+| `app` | 3000 | Application server (API + Frontend) |
 | `worker` | - | Document & email processing worker |
 | `postgres` | 5432 | PostgreSQL with pgvector |
 | `temporal` | 7233, 8233 | Workflow orchestration & UI |
@@ -103,20 +101,13 @@ The easiest way to run TLDR is with Docker Compose. All dependencies (PostgreSQL
 
 ### Persistent Data
 
-All data is stored in Docker volumes:
-- `tldr-postgres-data` - Database
-- `tldr-temporal-data` - Workflow state
-- `tldr-uploads-data` - Uploaded documents
-- `tldr-ollama-data` - Ollama models (if enabled)
+All data is stored in local directories (bind mounts):
+- `./data/postgres/` - PostgreSQL database
+- `./data/temporal/` - Temporal workflow state
+- `./uploads/` - Uploaded documents
+- `./data/ollama/` - Ollama models (if enabled)
 
-To backup or migrate data:
-```bash
-# List volumes
-docker volume ls | grep tldr
-
-# Backup uploads
-docker run --rm -v tldr-uploads-data:/data -v $(pwd):/backup alpine tar czf /backup/uploads-backup.tar.gz /data
-```
+These directories are automatically created by Docker and excluded from git.
 
 ### Stopping and Cleanup
 
@@ -124,8 +115,8 @@ docker run --rm -v tldr-uploads-data:/data -v $(pwd):/backup alpine tar czf /bac
 # Stop all services
 docker compose down
 
-# Stop and remove volumes (WARNING: deletes all data)
-docker compose down -v
+# Stop and remove all data (WARNING: deletes everything)
+docker compose down && rm -rf data/
 ```
 
 ---

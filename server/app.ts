@@ -28,6 +28,9 @@ app.use(cookieParser());
 const uploadsPath = join(__dirname, '..', 'uploads');
 app.use('/uploads', express.static(uploadsPath));
 
+// In production, serve the frontend static files
+const distPath = join(__dirname, '..', 'dist');
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentsRoutes);
@@ -38,6 +41,20 @@ app.use('/api/email-settings', emailSettingsRoutes);
 app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
+
+// In production, serve frontend static files and handle SPA routing
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(distPath));
+
+  // SPA fallback - serve index.html for non-API routes
+  app.get('*', (req: Request, res: Response, next: NextFunction) => {
+    // Skip API routes and uploads
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+      return next();
+    }
+    res.sendFile(join(distPath, 'index.html'));
+  });
+}
 
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
@@ -131,6 +148,6 @@ export async function closeServer(): Promise<void> {
 
 // Start server if this file is run directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = parseInt(process.env.API_PORT || '3001', 10);
+  const port = parseInt(process.env.PORT || process.env.API_PORT || '3001', 10);
   startServer(port);
 }

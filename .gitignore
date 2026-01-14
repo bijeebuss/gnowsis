@@ -37,6 +37,9 @@ coverage
 uploads/*
 !uploads/.gitkeep
 
+# Docker data volumes
+data/
+
 # Temporary files
 *.tmp
 .cache
