@@ -1,0 +1,67 @@
+{
+  "compilerOptions": {
+    // File Layout
+    "rootDir": ".",
+    "outDir": "./dist",
+
+    // Environment Settings
+    "module": "ESNext",
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    // Module Resolution
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // Path Mappings for absolute imports
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"],
+      "@/app/*": ["./app/*"],
+      "@/server/*": ["./server/*"],
+      "@/workflows/*": ["./workflows/*"],
+      "@/activities/*": ["./activities/*"],
+      "@/components/*": ["./app/components/*"]
+    },
+
+    // Other Outputs
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Stricter Typechecking Options
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    // Recommended Options
+    "strict": true,
+    "jsx": "react-jsx",
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noUncheckedSideEffectImports": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    // Additional strict options
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": [
+    "app/**/*",
+    "server/**/*",
+    "workflows/**/*",
+    "activities/**/*",
+    "vite.config.ts",
+    "app.config.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".vinxi"
+  ]
+}

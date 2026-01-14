@@ -1,0 +1,158 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  extensions = [vector]
+}
+
+// Enums
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  OCR_COMPLETE
+  INDEXED
+  READY
+  ERROR
+}
+
+enum ProcessingStage {
+  FILE_RECEIVED
+  PDF_CONVERSION
+  OCR_EXTRACTION
+  VECTORIZATION
+  INDEXING_COMPLETE
+}
+
+// Users Model
+model Users {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  password_hash String
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  // Email ingestion settings
+  imap_enabled            Boolean  @default(false)
+  imap_server             String?
+  imap_port               Int?
+  imap_username           String?
+  imap_password_encrypted String?
+  imap_folder             String?  @default("INBOX")
+  imap_last_uid           Int?
+
+  // Relations
+  documents Documents[]
+  tags      Tags[]
+
+  @@index([email])
+  @@index([imap_enabled])
+  @@map("users")
+}
+
+// Documents Model
+model Documents {
+  id                String         @id @default(uuid())
+  user_id           String
+  title             String?
+  notes             String?
+  filename          String
+  original_filename String
+  file_path         String
+  file_size         Int
+  file_type         String
+  status            DocumentStatus @default(UPLOADED)
+  upload_date       DateTime       @default(now())
+  updated_at        DateTime       @updatedAt
+
+  // Relations
+  user             Users              @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  processingStatus ProcessingStatus[]
+  vectors          Vectors[]
+  tags             DocumentTags[]
+  metadata         MetadataFields[]
+
+  @@index([user_id, upload_date])
+  @@map("documents")
+}
+
+// ProcessingStatus Model
+model ProcessingStatus {
+  id             String           @id @default(uuid())
+  document_id    String
+  stage          ProcessingStage
+  started_at     DateTime         @default(now())
+  completed_at   DateTime?
+  error_message  String?
+  retry_count    Int              @default(0)
+
+  // Relations
+  document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
+
+  @@index([document_id, started_at])
+  @@map("processing_status")
+}
+
+// Vectors Model
+model Vectors {
+  id             String                         @id @default(uuid())
+  document_id    String
+  page_number    Int
+  dense_vector   Unsupported("vector(1536)")?
+  sparse_vector  Json?
+  text_content   String
+
+  // Relations
+  document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
+
+  @@index([document_id])
+  @@map("vectors")
+}
+
+// Tags Model
+model Tags {
+  id          String   @id @default(uuid())
+  name        String
+  user_id     String
+  created_at  DateTime @default(now())
+
+  // Relations
+  user         Users          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  documentTags DocumentTags[]
+
+  @@unique([name, user_id])
+  @@map("tags")
+}
+
+// DocumentTags Join Table
+model DocumentTags {
+  document_id String
+  tag_id      String
+
+  // Relations
+  document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
+  tag      Tags      @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@id([document_id, tag_id])
+  @@map("document_tags")
+}
+
+// MetadataFields Model
+model MetadataFields {
+  id          String   @id @default(uuid())
+  document_id String
+  field_name  String
+  field_value String
+  created_at  DateTime @default(now())
+
+  // Relations
+  document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
+
+  @@index([document_id])
+  @@map("metadata_fields")
+}
