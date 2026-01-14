@@ -3,7 +3,10 @@
  *
  * This provides keyword-based matching for hybrid search.
  * Sparse vectors capture exact term matches and keyword relevance.
+ * Uses Porter stemming to normalize word variants (e.g., "masks" → "mask").
  */
+
+import { stemmer } from 'stemmer';
 
 /**
  * Common stop words to filter out (noise reduction)
@@ -36,12 +39,12 @@ export function generateSparseVector(text: string): { [token: string]: number } 
   // Tokenize into words
   const words = normalizedText.match(/\b\w+\b/g) || [];
 
-  // Filter stop words and short words
-  const filteredWords = words.filter(
-    word => word.length > 2 && !STOP_WORDS.has(word)
-  );
+  // Filter stop words and short words, then apply stemming
+  const filteredWords = words
+    .filter(word => word.length > 2 && !STOP_WORDS.has(word))
+    .map(word => stemmer(word));
 
-  // Count term frequencies
+  // Count term frequencies (using stemmed words)
   const termFrequency: { [token: string]: number } = {};
   const totalTerms = filteredWords.length;
 
