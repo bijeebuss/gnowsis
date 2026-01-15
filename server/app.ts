@@ -47,7 +47,11 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distPath));
 
   // SPA fallback - serve index.html for non-API routes (must come after all routes)
-  app.get('/*', (req: Request, res: Response, next: NextFunction) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    // Only handle GET requests for SPA routing
+    if (req.method !== 'GET') {
+      return next();
+    }
     // Skip API routes, uploads, and health check
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path === '/health') {
       return next();
@@ -57,7 +61,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Error handling middleware
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
