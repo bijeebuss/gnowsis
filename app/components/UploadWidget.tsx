@@ -12,6 +12,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Dialog,
   DialogContent,
@@ -23,7 +24,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
-import { X, Upload, FileText, Image, Camera, RefreshCw } from 'lucide-react';
+import { X, Upload, FileText, Image, Camera, RefreshCw, ArrowLeft } from 'lucide-react';
 import { getSession, clearSession, isAuthenticated } from '../utils/auth';
 
 interface UploadWidgetProps {
@@ -54,6 +55,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraLoading, setIsCameraLoading] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const [showFlash, setShowFlash] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -360,6 +362,10 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
       return;
     }
 
+    // Trigger flash effect
+    setShowFlash(true);
+    setTimeout(() => setShowFlash(false), 150);
+
     // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -436,6 +442,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
   };
 
   return (
+    <>
     <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader>
@@ -496,78 +503,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
             </div>
           )}
 
-          {/* Camera Mode */}
-          {captureMode === 'camera' && (
-            <div className="space-y-4">
-              {/* Camera Error */}
-              {cameraError && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded text-sm text-red-800">
-                  {cameraError}
-                  <Button
-                    variant="link"
-                    className="ml-2 p-0 h-auto text-red-800 underline"
-                    onClick={startCamera}
-                  >
-                    Try again
-                  </Button>
-                </div>
-              )}
-
-              {/* Camera Preview - always render video element so ref is available */}
-              <div className="space-y-4">
-                <div className="relative rounded-lg overflow-hidden bg-black" style={{ minHeight: '200px' }}>
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full"
-                    style={{ maxHeight: '300px', objectFit: 'cover' }}
-                  />
-                  {/* Loading overlay */}
-                  {isCameraLoading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black">
-                      <div className="animate-pulse text-center">
-                        <Camera className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
-                        <p className="text-sm text-muted-foreground">Starting camera...</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Camera Controls */}
-                <div className="flex justify-center items-center gap-4">
-                  <Button
-                    variant="outline"
-                    onClick={switchCamera}
-                    disabled={!cameraStream || isCameraLoading}
-                    size="icon"
-                    className="rounded-full w-12 h-12"
-                    title="Switch camera"
-                  >
-                    <RefreshCw className="w-5 h-5" />
-                  </Button>
-                  <Button
-                    onClick={capturePhoto}
-                    disabled={!cameraStream || isCameraLoading}
-                    size="lg"
-                    className="rounded-full w-16 h-16"
-                  >
-                    <Camera className="w-6 h-6" />
-                  </Button>
-                  <div className="w-12" /> {/* Spacer for balance */}
-                </div>
-
-                <p className="text-xs text-center text-muted-foreground">
-                  Tap capture to take a photo. Take multiple photos to add more.
-                </p>
-              </div>
-
-              {/* Hidden canvas for capture */}
-              <canvas ref={canvasRef} className="hidden" />
-            </div>
-          )}
-
+          
           {/* Selected Files */}
           {files.length > 0 && (
             <div className="space-y-2">
@@ -683,5 +619,124 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
         </div>
       </DialogContent>
     </Dialog>
+
+    {/* Hidden canvas for camera capture - must be outside Dialog for reliable access */}
+    <canvas ref={canvasRef} className="hidden" />
+
+    {/* Fullscreen Camera Mode - rendered in portal to layer above Dialog */}
+    {isOpen && captureMode === 'camera' && typeof document !== 'undefined' && createPortal(
+      <div
+        className="fixed inset-0 z-[100] bg-black flex flex-col"
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Flash effect overlay */}
+        {showFlash && (
+          <div className="absolute inset-0 bg-white z-50 pointer-events-none animate-flash" />
+        )}
+
+        {/* Top bar with back button and photo count */}
+        <div className="absolute top-0 left-0 right-0 z-10 p-4 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => handleModeChange('upload')}
+            className="text-white hover:bg-white/20 rounded-full w-10 h-10"
+          >
+            <ArrowLeft className="w-6 h-6" />
+          </Button>
+          {files.length > 0 && (
+            <div className="bg-white/20 text-white px-3 py-1 rounded-full text-sm font-medium">
+              {files.length} photo{files.length !== 1 ? 's' : ''}
+            </div>
+          )}
+        </div>
+
+        {/* Camera Error */}
+        {cameraError && (
+          <div className="absolute top-20 left-4 right-4 z-10 p-3 bg-red-500/90 rounded-lg text-sm text-white">
+            {cameraError}
+            <Button
+              variant="link"
+              className="ml-2 p-0 h-auto text-white underline"
+              onClick={startCamera}
+            >
+              Try again
+            </Button>
+          </div>
+        )}
+
+        {/* Camera Preview - fills the screen */}
+        <div className="flex-1 flex items-center justify-center">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover pointer-events-none"
+          />
+          {/* Loading overlay */}
+          {isCameraLoading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black">
+              <div className="animate-pulse text-center">
+                <Camera className="w-12 h-12 mx-auto text-white/60 mb-3" />
+                <p className="text-sm text-white/60">Starting camera...</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom controls */}
+        <div className="absolute bottom-0 left-0 right-0 z-10 pb-8 pt-4 bg-gradient-to-t from-black/60 to-transparent">
+          <div className="flex justify-center items-center gap-8">
+            <Button
+              variant="ghost"
+              onClick={switchCamera}
+              disabled={!cameraStream || isCameraLoading}
+              size="icon"
+              className="rounded-full w-12 h-12 text-white hover:bg-white/20"
+              title="Switch camera"
+            >
+              <RefreshCw className="w-6 h-6" />
+            </Button>
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                capturePhoto();
+              }}
+              disabled={!cameraStream || isCameraLoading}
+              className="rounded-full w-20 h-20 bg-white hover:bg-gray-200 border-4 border-white/30 flex items-center justify-center"
+            >
+              <div className="w-16 h-16 rounded-full bg-white border-2 border-gray-300 pointer-events-none" />
+            </button>
+            <Button
+              variant="ghost"
+              onClick={() => handleModeChange('upload')}
+              disabled={files.length === 0}
+              size="icon"
+              className="rounded-full w-12 h-12 text-white hover:bg-white/20"
+              title="Done"
+            >
+              {files.length > 0 ? (
+                <span className="text-sm font-medium">Done</span>
+              ) : (
+                <div className="w-6 h-6" />
+              )}
+            </Button>
+          </div>
+          <p className="text-xs text-center text-white/70 mt-4">
+            Tap to capture. Take multiple photos for multi-page documents.
+          </p>
+        </div>
+      </div>,
+      document.body
+    )}
+    </>
   );
 }

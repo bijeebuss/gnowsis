@@ -81,3 +81,17 @@
     font-weight: 500;
   }
 }
+
+/* Camera flash animation */
+@keyframes flash {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.animate-flash {
+  animation: flash 150ms ease-out forwards;
+}
