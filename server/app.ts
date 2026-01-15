@@ -15,6 +15,9 @@ const __dirname = dirname(__filename);
 
 export const app: Express = express();
 
+// Trust proxy (needed when behind reverse proxy for HTTPS)
+app.set('trust proxy', true);
+
 // Middleware
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -52,8 +55,8 @@ if (process.env.NODE_ENV === 'production') {
     if (req.method !== 'GET') {
       return next();
     }
-    // Skip API routes, uploads, and health check
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path === '/health') {
+    // Skip API routes, uploads, health check, and static assets
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/assets') || req.path === '/health') {
       return next();
     }
     res.sendFile(join(distPath, 'index.html'));
