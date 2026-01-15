@@ -46,10 +46,10 @@ app.get('/health', (req: Request, res: Response) => {
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distPath));
 
-  // SPA fallback - serve index.html for non-API routes
-  app.get('*', (req: Request, res: Response, next: NextFunction) => {
-    // Skip API routes and uploads
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+  // SPA fallback - serve index.html for non-API routes (must come after all routes)
+  app.get('/*', (req: Request, res: Response, next: NextFunction) => {
+    // Skip API routes, uploads, and health check
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path === '/health') {
       return next();
     }
     res.sendFile(join(distPath, 'index.html'));
