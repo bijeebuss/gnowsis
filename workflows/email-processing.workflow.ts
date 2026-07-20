@@ -69,7 +69,9 @@ export async function CheckUserEmailsWorkflow(userId: string): Promise<void> {
  * Note: Subject is passed separately as title, so not included here
  */
 function formatEmailMetadataForSearch(
-  metadata: { from: string; to: string; cc: string; date?: string }
+  metadata: { from: string; to: string; cc: string; date?: string },
+  attachmentNames: string[],
+  skippedAttachments: Array<{ filename: string; reason: string }>,
 ): string {
   const lines: string[] = [];
 
@@ -90,6 +92,16 @@ function formatEmailMetadataForSearch(
     lines.push(`Date: ${date.toISOString()}`);
   }
 
+  if (attachmentNames.length > 0) {
+    lines.push(`Attachments: ${attachmentNames.join(', ')}`);
+  }
+
+  if (skippedAttachments.length > 0) {
+    lines.push(`Skipped attachments: ${skippedAttachments
+      .map(attachment => `${attachment.filename} (${attachment.reason})`)
+      .join(', ')}`);
+  }
+
   return lines.join('\n');
 }
 
@@ -105,23 +117,39 @@ export async function EmailDocumentProcessingWorkflow(
 ): Promise<void> {
   console.log(`Processing email "${subject}" (${emailId})`);
 
-  const { html, metadata } = await fetchEmailHtml(userId, emailUid);
-  console.log(`Fetched email HTML with metadata: from=${metadata.from}, to=${metadata.to}`);
-
   // Create document record first to get the document ID
   const sourceKey = `imap:${userId}:${uidValidity}:${emailUid}`;
   const documentId = await createDocumentRecord(userId, subject, sourceKey);
   console.log(`Created document record: ${documentId}`);
 
-  // Convert HTML to PDF and save under the document ID
   try {
-    const pdfPath = await convertHtmlToPdf(documentId, html);
+    const { html, metadata, attachments, inlineImages, skippedAttachments } = await fetchEmailHtml(
+      userId,
+      emailUid,
+      documentId,
+    );
+    console.log(
+      `Fetched email HTML with ${attachments.length} processable attachments `
+      + `and ${skippedAttachments.length} skipped attachments`,
+    );
+
+    // Convert HTML to PDF and save it beside the extracted attachments.
+    const pdfPath = await convertHtmlToPdf(documentId, html, inlineImages);
     console.log(`Converted to PDF: ${pdfPath}`);
-    await updateDocumentPath(documentId, pdfPath);
-    const emailMetadataText = formatEmailMetadataForSearch(metadata);
+    await updateDocumentPath(documentId, pdfPath, attachments);
+    const emailMetadataText = formatEmailMetadataForSearch(
+      metadata,
+      attachments.map(attachment => attachment.originalFilename),
+      skippedAttachments,
+    );
     await executeChild(DocumentProcessingWorkflow, {
       workflowId: `doc-processing-${documentId}`,
-      args: [documentId, [pdfPath], subject, emailMetadataText],
+      args: [
+        documentId,
+        [pdfPath, ...attachments.map(attachment => attachment.filePath)],
+        subject,
+        emailMetadataText,
+      ],
       taskQueue: 'document-processing',
     });
     console.log(`Completed document processing for ${documentId}`);

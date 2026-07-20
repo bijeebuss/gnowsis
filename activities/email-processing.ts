@@ -27,6 +27,144 @@ export interface EmailMetadata {
   subject?: string;
 }
 
+export interface StoredEmailAttachment {
+  filePath: string;
+  filename: string;
+  originalFilename: string;
+  fileSize: number;
+  fileType: string;
+}
+
+export interface StoredEmailInlineImage {
+  filePath: string;
+  filename: string;
+  fileType: string;
+}
+
+export interface SkippedEmailAttachment {
+  filename: string;
+  reason: string;
+}
+
+interface ParsedEmailAttachment {
+  content: Buffer;
+  contentType?: string;
+  contentDisposition?: string;
+  contentId?: string;
+  cid?: string;
+  filename?: string;
+  related?: boolean;
+  size?: number;
+}
+
+const MAX_EMAIL_ATTACHMENT_COUNT = 20;
+const MAX_EMAIL_ATTACHMENT_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_EMAIL_ATTACHMENT_TOTAL_SIZE = 100 * 1024 * 1024;
+
+function attachmentName(attachment: ParsedEmailAttachment, index: number): string {
+  const suppliedName = attachment.filename?.trim();
+  if (!suppliedName) return `attachment-${index + 1}`;
+
+  // MIME filenames are untrusted and later become ZIP entry names.
+  const basename = path.basename(suppliedName.replace(/\\/g, '/'));
+  const sanitized = basename.replace(/[\x00-\x1f\x7f]/g, '_').slice(0, 255);
+  return sanitized || `attachment-${index + 1}`;
+}
+
+function attachmentDownloadName(
+  originalFilename: string,
+  detectedExtension: 'pdf' | 'png' | 'jpg',
+): string {
+  const currentExtension = path.extname(originalFilename).slice(1).toLowerCase();
+  const matchesDetectedType = currentExtension === detectedExtension
+    || (detectedExtension === 'jpg' && currentExtension === 'jpeg');
+  return matchesDetectedType ? originalFilename : `${originalFilename}.${detectedExtension}`;
+}
+
+/**
+ * Inline and multipart/related parts are body assets (most commonly signature
+ * logos and icons), not standalone document pages. CID references provide a
+ * fallback for messages whose Content-Disposition header is incomplete.
+ */
+export function isInlineEmailAttachment(
+  attachment: ParsedEmailAttachment,
+  htmlContent: string,
+): boolean {
+  if (attachment.contentDisposition?.toLowerCase() === 'inline' || attachment.related) {
+    return true;
+  }
+
+  const cid = (attachment.cid || attachment.contentId || '')
+    .trim()
+    .replace(/^<|>$/g, '')
+    .toLowerCase();
+  if (!cid) return false;
+
+  const normalizedHtml = htmlContent.toLowerCase();
+  return normalizedHtml.includes(`cid:${cid}`)
+    || normalizedHtml.includes(`cid:${encodeURIComponent(cid).toLowerCase()}`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Replace a CID URL with a local asset name that Gotenberg receives alongside the HTML. */
+export function replaceInlineImageReference(
+  htmlContent: string,
+  cidValue: string,
+  replacement: string,
+): string {
+  let renderedHtml = htmlContent;
+  const cid = cidValue.trim().replace(/^<|>$/g, '');
+  for (const cidForm of new Set([cid, encodeURIComponent(cid)])) {
+    renderedHtml = renderedHtml.replace(
+      new RegExp(`cid:${escapeRegExp(cidForm)}`, 'gi'),
+      replacement,
+    );
+  }
+  return renderedHtml;
+}
+
+function detectRenderableInlineImageType(
+  attachment: ParsedEmailAttachment,
+): { extension: string; mimeType: string } | null {
+  const documentType = detectEmailAttachmentType(attachment.content);
+  if (documentType?.mimeType.startsWith('image/')) return documentType;
+
+  const header = attachment.content.subarray(0, 12);
+  if (header.subarray(0, 6).toString('ascii') === 'GIF87a'
+    || header.subarray(0, 6).toString('ascii') === 'GIF89a') {
+    return { extension: 'gif', mimeType: 'image/gif' };
+  }
+  if (header.subarray(0, 4).toString('ascii') === 'RIFF'
+    && header.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { extension: 'webp', mimeType: 'image/webp' };
+  }
+
+  return null;
+}
+
+/** Detect supported content from its bytes instead of trusting MIME headers. */
+export function detectEmailAttachmentType(
+  content: Buffer,
+): { extension: 'pdf' | 'png' | 'jpg'; mimeType: string } | null {
+  const pdfHeader = content.subarray(0, Math.min(content.length, 1024)).indexOf(Buffer.from('%PDF-'));
+  if (pdfHeader >= 0) return { extension: 'pdf', mimeType: 'application/pdf' };
+
+  if (content.subarray(0, 8).equals(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  )) {
+    return { extension: 'png', mimeType: 'image/png' };
+  }
+
+  if (content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) {
+    return { extension: 'jpg', mimeType: 'image/jpeg' };
+  }
+
+  return null;
+}
+
 /**
  * Get all users with IMAP enabled
  */
@@ -148,8 +286,15 @@ function formatAddress(addr: any): string {
  */
 export async function fetchEmailHtml(
   userId: string,
-  uid: number
-): Promise<{ html: string; metadata: EmailMetadata }> {
+  uid: number,
+  documentId: string,
+): Promise<{
+  html: string;
+  metadata: EmailMetadata;
+  attachments: StoredEmailAttachment[];
+  inlineImages: StoredEmailInlineImage[];
+  skippedAttachments: SkippedEmailAttachment[];
+}> {
   const user = await prisma.users.findUnique({
     where: { id: userId },
     select: {
@@ -197,6 +342,9 @@ export async function fetchEmailHtml(
 
       let htmlContent = '';
       let metadata: EmailMetadata = { from: '', to: '', cc: '' };
+      let storedAttachments: StoredEmailAttachment[] = [];
+      let storedInlineImages: StoredEmailInlineImage[] = [];
+      let skippedAttachments: SkippedEmailAttachment[] = [];
 
       for await (const message of messages) {
         if (!message.source) {
@@ -220,7 +368,74 @@ export async function fetchEmailHtml(
         } else if (parsed.text) {
           htmlContent = `<html><body><pre>${parsed.text}</pre></body></html>`;
         } else {
-          throw new Error('No HTML or text content found in email');
+          // Attachment-only messages still need a body page so they can enter
+          // the same PDF-first document pipeline.
+          htmlContent = '<html><body><p>This email has no text body.</p></body></html>';
+        }
+
+        const parsedAttachments = parsed.attachments as ParsedEmailAttachment[];
+        // Determine which parts are inline before replacing their cid: URLs.
+        const inlineAttachments = new Set(
+          parsedAttachments.filter(attachment => isInlineEmailAttachment(attachment, htmlContent)),
+        );
+
+        const uploadDir = path.join(process.cwd(), 'uploads', documentId);
+        await fs.mkdir(uploadDir, { recursive: true });
+        let totalAttachmentSize = 0;
+
+        for (const [index, parsedAttachment] of parsedAttachments.entries()) {
+          const originalFilename = attachmentName(parsedAttachment, index);
+
+          if (inlineAttachments.has(parsedAttachment)) {
+            const cid = parsedAttachment.cid || parsedAttachment.contentId || '';
+            const inlineType = detectRenderableInlineImageType(parsedAttachment);
+            if (cid && inlineType) {
+              const filename = `inline-${index + 1}.${inlineType.extension}`;
+              const filePath = path.join(uploadDir, filename);
+              await fs.writeFile(filePath, parsedAttachment.content);
+              htmlContent = replaceInlineImageReference(htmlContent, cid, filename);
+              storedInlineImages.push({
+                filePath,
+                filename,
+                fileType: inlineType.mimeType,
+              });
+            } else {
+              console.log(`Skipping non-renderable inline email body asset: ${originalFilename}`);
+            }
+            continue;
+          }
+
+          const detectedType = detectEmailAttachmentType(parsedAttachment.content);
+          if (!detectedType) {
+            skippedAttachments.push({ filename: originalFilename, reason: 'unsupported file type' });
+            continue;
+          }
+
+          const fileSize = parsedAttachment.content.length;
+          if (fileSize > MAX_EMAIL_ATTACHMENT_FILE_SIZE) {
+            skippedAttachments.push({ filename: originalFilename, reason: 'file exceeds 50 MB limit' });
+            continue;
+          }
+          if (storedAttachments.length >= MAX_EMAIL_ATTACHMENT_COUNT) {
+            skippedAttachments.push({ filename: originalFilename, reason: 'attachment count exceeds 20' });
+            continue;
+          }
+          if (totalAttachmentSize + fileSize > MAX_EMAIL_ATTACHMENT_TOTAL_SIZE) {
+            skippedAttachments.push({ filename: originalFilename, reason: 'total attachments exceed 100 MB limit' });
+            continue;
+          }
+
+          const filename = `attachment-${index + 1}.${detectedType.extension}`;
+          const filePath = path.join(uploadDir, filename);
+          await fs.writeFile(filePath, parsedAttachment.content);
+          totalAttachmentSize += fileSize;
+          storedAttachments.push({
+            filePath,
+            filename,
+            originalFilename: attachmentDownloadName(originalFilename, detectedType.extension),
+            fileSize,
+            fileType: detectedType.mimeType,
+          });
         }
       }
 
@@ -228,7 +443,13 @@ export async function fetchEmailHtml(
         throw new Error('Email not found');
       }
 
-      return { html: htmlContent, metadata };
+      return {
+        html: htmlContent,
+        metadata,
+        attachments: storedAttachments,
+        inlineImages: storedInlineImages,
+        skippedAttachments,
+      };
     } finally {
       lock.release();
     }
@@ -242,7 +463,8 @@ export async function fetchEmailHtml(
  */
 export async function convertHtmlToPdf(
   documentId: string,
-  htmlContent: string
+  htmlContent: string,
+  inlineImages: StoredEmailInlineImage[] = [],
 ): Promise<string> {
   const GOTENBERG_URL = process.env.GOTENBURG_URL;
   if (!GOTENBERG_URL) {
@@ -256,13 +478,25 @@ export async function convertHtmlToPdf(
   const boundary = `----WebKitFormBoundary${Math.random().toString(36).substring(2)}`;
   const htmlData = Buffer.from(htmlContent, 'utf-8');
 
-  const body = Buffer.concat([
+  const parts: Buffer[] = [
     Buffer.from(`--${boundary}\r\n`),
-    Buffer.from(`Content-Disposition: form-data; name="files"; filename="index.html"\r\n`),
-    Buffer.from(`Content-Type: text/html\r\n\r\n`),
+    Buffer.from('Content-Disposition: form-data; name="files"; filename="index.html"\r\n'),
+    Buffer.from('Content-Type: text/html\r\n\r\n'),
     htmlData,
-    Buffer.from(`\r\n--${boundary}--\r\n`)
-  ]);
+    Buffer.from('\r\n'),
+  ];
+
+  for (const inlineImage of inlineImages) {
+    parts.push(
+      Buffer.from(`--${boundary}\r\n`),
+      Buffer.from(`Content-Disposition: form-data; name="files"; filename="${inlineImage.filename}"\r\n`),
+      Buffer.from(`Content-Type: ${inlineImage.fileType}\r\n\r\n`),
+      await fs.readFile(inlineImage.filePath),
+      Buffer.from('\r\n'),
+    );
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  const body = Buffer.concat(parts);
 
   const response = await fetch(`${gotenbergUrl}/forms/chromium/convert/html`, {
     method: 'POST',
@@ -320,27 +554,41 @@ export async function createDocumentRecord(
  */
 export async function updateDocumentPath(
   documentId: string,
-  pdfPath: string
+  pdfPath: string,
+  attachments: StoredEmailAttachment[] = [],
 ): Promise<void> {
   const stats = await fs.stat(pdfPath);
+  const totalSize = stats.size + attachments.reduce((sum, attachment) => sum + attachment.fileSize, 0);
 
   await prisma.$transaction(async (tx) => {
     await tx.documents.update({
       where: { id: documentId },
-      data: { file_path: pdfPath, file_size: stats.size },
+      data: { file_path: pdfPath, file_size: totalSize },
     });
-    await tx.documentFiles.upsert({
-      where: { document_id_position: { document_id: documentId, position: 0 } },
-      update: { file_path: pdfPath, file_size: stats.size },
-      create: {
-        document_id: documentId,
-        position: 0,
-        filename: 'email.pdf',
-        original_filename: 'email.pdf',
-        file_path: pdfPath,
-        file_size: stats.size,
-        file_type: 'application/pdf',
-      },
+
+    // Replace the list atomically so activity retries cannot leave stale rows.
+    await tx.documentFiles.deleteMany({ where: { document_id: documentId } });
+    await tx.documentFiles.createMany({
+      data: [
+        {
+          document_id: documentId,
+          position: 0,
+          filename: 'email.pdf',
+          original_filename: 'email.pdf',
+          file_path: pdfPath,
+          file_size: stats.size,
+          file_type: 'application/pdf',
+        },
+        ...attachments.map((attachment, index) => ({
+          document_id: documentId,
+          position: index + 1,
+          filename: attachment.filename,
+          original_filename: attachment.originalFilename,
+          file_path: attachment.filePath,
+          file_size: attachment.fileSize,
+          file_type: attachment.fileType,
+        })),
+      ],
     });
   });
 }
