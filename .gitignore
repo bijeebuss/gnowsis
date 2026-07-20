@@ -39,6 +39,7 @@ uploads/*
 
 # Docker data volumes
 data/
+.migration-backups/
 
 # Temporary files
 *.tmp

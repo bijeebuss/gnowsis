@@ -8,7 +8,7 @@ const { Pool } = pg;
 /**
  * Create PostgreSQL connection pool
  */
-const pool = new Pool({
+export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
@@ -23,10 +23,19 @@ const adapter = new PrismaPg(pool);
  */
 export const prisma = new PrismaClient({ adapter });
 
+let closePromise: Promise<void> | null = null;
+
+export function closeDatabase(): Promise<void> {
+  closePromise ??= (async () => {
+    await prisma.$disconnect();
+    await pool.end();
+  })();
+  return closePromise;
+}
+
 /**
  * Gracefully close Prisma connection on process termination
  */
-process.on('beforeExit', async () => {
-  await prisma.$disconnect();
-  await pool.end();
+process.once('beforeExit', async () => {
+  await closeDatabase();
 });

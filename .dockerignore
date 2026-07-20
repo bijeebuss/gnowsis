@@ -22,6 +22,9 @@ dist
 uploads/*
 !uploads/.gitkeep
 
+# Runtime service data (mounted as volumes)
+data/
+
 # IDE
 .vscode
 .idea

@@ -1,4 +1,4 @@
-import { proxyActivities, startChild, ParentClosePolicy } from '@temporalio/workflow';
+import { executeChild, proxyActivities } from '@temporalio/workflow';
 import type * as emailActivities from '../activities/email-processing';
 import { DocumentProcessingWorkflow } from './document-processing.workflow';
 
@@ -9,6 +9,7 @@ const {
   convertHtmlToPdf,
   createDocumentRecord,
   updateDocumentPath,
+  failEmailDocument,
   updateImapLastUid,
 } = proxyActivities<typeof emailActivities>({
   startToCloseTimeout: '2 minutes',
@@ -30,11 +31,10 @@ export async function EmailIngestionSchedulerWorkflow(): Promise<void> {
   console.log(`Found ${users.length} users with email sync enabled`);
 
   for (const user of users) {
-    await startChild(CheckUserEmailsWorkflow, {
+    await executeChild(CheckUserEmailsWorkflow, {
       workflowId: `check-emails-${user.userId}-${Date.now()}`,
       args: [user.userId],
       taskQueue: 'email-processing',
-      parentClosePolicy: ParentClosePolicy.ABANDON,
     });
   }
 }
@@ -45,7 +45,7 @@ export async function EmailIngestionSchedulerWorkflow(): Promise<void> {
 export async function CheckUserEmailsWorkflow(userId: string): Promise<void> {
   console.log(`Checking emails for user ${userId}`);
 
-  const emails = await getUserEmails(userId);
+  const { emails, uidValidity } = await getUserEmails(userId);
   console.log(`Found ${emails.length} new emails for user ${userId}`);
 
   if (emails.length > 0) {
@@ -53,19 +53,14 @@ export async function CheckUserEmailsWorkflow(userId: string): Promise<void> {
     console.log(`Email UIDs to process: [${uids.join(', ')}]`);
   }
 
-  for (const email of emails) {
-    await startChild(EmailDocumentProcessingWorkflow, {
-      workflowId: `email-doc-${email.emailId}`,
-      args: [userId, email.uid, email.emailId, email.subject],
+  for (const email of [...emails].sort((a, b) => a.uid - b.uid)) {
+    await executeChild(EmailDocumentProcessingWorkflow, {
+      workflowId: `email-doc-${email.emailId}-${uidValidity}`,
+      args: [userId, email.uid, email.emailId, email.subject, uidValidity],
       taskQueue: 'email-processing',
-      parentClosePolicy: ParentClosePolicy.ABANDON,
     });
-  }
-
-  if (emails.length > 0) {
-    const lastUid = Math.max(...emails.map(e => e.uid));
-    await updateImapLastUid(userId, lastUid);
-    console.log(`Updated last UID from previous value to ${lastUid} for user ${userId}`);
+    await updateImapLastUid(userId, email.uid, uidValidity);
+    console.log(`Updated last UID to ${email.uid} for user ${userId}`);
   }
 }
 
@@ -92,7 +87,7 @@ function formatEmailMetadataForSearch(
 
   if (metadata.date) {
     const date = new Date(metadata.date);
-    lines.push(`Date: ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`);
+    lines.push(`Date: ${date.toISOString()}`);
   }
 
   return lines.join('\n');
@@ -105,7 +100,8 @@ export async function EmailDocumentProcessingWorkflow(
   userId: string,
   emailUid: number,
   emailId: string,
-  subject: string
+  subject: string,
+  uidValidity: string,
 ): Promise<void> {
   console.log(`Processing email "${subject}" (${emailId})`);
 
@@ -113,28 +109,25 @@ export async function EmailDocumentProcessingWorkflow(
   console.log(`Fetched email HTML with metadata: from=${metadata.from}, to=${metadata.to}`);
 
   // Create document record first to get the document ID
-  const documentId = await createDocumentRecord(userId, subject);
+  const sourceKey = `imap:${userId}:${uidValidity}:${emailUid}`;
+  const documentId = await createDocumentRecord(userId, subject, sourceKey);
   console.log(`Created document record: ${documentId}`);
 
   // Convert HTML to PDF and save under the document ID
-  const pdfPath = await convertHtmlToPdf(documentId, html);
-  console.log(`Converted to PDF: ${pdfPath}`);
-
-  // Update document with the PDF path
-  await updateDocumentPath(documentId, pdfPath);
-
-  // Format email metadata as searchable notes
-  const emailMetadataText = formatEmailMetadataForSearch(metadata);
-
-  // Start document processing child workflow and wait for it to start
-  // This ensures the document exists before the child begins processing
-  // Pass subject as title and formatted metadata as notes for vectorization
-  const childHandle = await startChild(DocumentProcessingWorkflow, {
-    workflowId: `doc-processing-${documentId}`,
-    args: [documentId, [pdfPath], subject, emailMetadataText],
-    taskQueue: 'document-processing',
-    parentClosePolicy: ParentClosePolicy.ABANDON,
-  });
-
-  console.log(`Started document processing for ${documentId} (workflow ${childHandle.workflowId})`);
+  try {
+    const pdfPath = await convertHtmlToPdf(documentId, html);
+    console.log(`Converted to PDF: ${pdfPath}`);
+    await updateDocumentPath(documentId, pdfPath);
+    const emailMetadataText = formatEmailMetadataForSearch(metadata);
+    await executeChild(DocumentProcessingWorkflow, {
+      workflowId: `doc-processing-${documentId}`,
+      args: [documentId, [pdfPath], subject, emailMetadataText],
+      taskQueue: 'document-processing',
+    });
+    console.log(`Completed document processing for ${documentId}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown email processing error';
+    await failEmailDocument(documentId, message);
+    throw error;
+  }
 }

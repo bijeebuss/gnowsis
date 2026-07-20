@@ -18,7 +18,6 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
-import { setSession } from '../utils/auth';
 
 export const Route = createFileRoute('/login')({
   component: LoginPage,
@@ -60,11 +59,6 @@ function LoginPage() {
         setError(data.error || 'Login failed');
         setIsLoading(false);
         return;
-      }
-
-      // Store JWT token in localStorage (cookie is set by API)
-      if (data.token) {
-        setSession(data.token);
       }
 
       // Redirect to /dashboard on success

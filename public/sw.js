@@ -43,7 +43,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Network-first for API requests
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/uploads/')) {
+  if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(request)
         .then((response) => {

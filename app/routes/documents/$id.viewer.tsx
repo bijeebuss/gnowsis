@@ -5,7 +5,7 @@
  * Features:
  * - Apply ProtectedRoute wrapper
  * - Fetch document from GET /api/documents/:id
- * - Fetch page images from /uploads/{document-id}/pages/page-{n}.png
+ * - Fetch page images through the authenticated document-page API
  * - Display images in scrollable viewer with zoom controls: 50%, 100%, 150%, 200%
  * - Show extracted OCR text in side panel synchronized with page number
  * - Implement page navigation: Previous/Next buttons, page number selector
@@ -132,7 +132,7 @@ function DocumentViewerPage() {
         setPageTexts(data);
         // Update total pages based on actual data
         if (data.length > 0) {
-          setTotalPages(data.length);
+          setTotalPages(Math.max(1, Math.max(...data.map((page: PageText) => page.pageNumber)) + 1));
         } else {
           setTotalPages(1); // Default to 1 if no vectors yet
         }
@@ -169,7 +169,9 @@ function DocumentViewerPage() {
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = documentData?.filename || 'document';
+        const disposition = response.headers.get('Content-Disposition');
+        const responseFilename = disposition?.match(/filename="([^"]+)"/i)?.[1];
+        a.download = responseFilename || documentData?.filename || 'document';
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -375,7 +377,7 @@ function DocumentViewerPage() {
                 {/* Page Image */}
                 <div className="bg-muted rounded-lg p-4 overflow-auto max-h-[600px]">
                   <img
-                    src={`/uploads/${documentData.id}/pages/page-${currentPage}.png`}
+                    src={`/api/documents/${documentData.id}/pages/${currentPage}`}
                     alt={`Page ${currentPage + 1}`}
                     style={{ width: `${zoom}%` }}
                     className="mx-auto"
@@ -423,12 +425,12 @@ function DocumentViewerPage() {
               </CardHeader>
               <CardContent>
                 <div className="bg-muted rounded p-4 max-h-64 overflow-y-auto text-sm text-foreground">
-                  {pageTexts[currentPage] ? (
-                    <p className="whitespace-pre-wrap">{pageTexts[currentPage].text}</p>
+                  {pageTexts.find((page) => page.pageNumber === currentPage) ? (
+                    <p className="whitespace-pre-wrap">{pageTexts.find((page) => page.pageNumber === currentPage)!.text}</p>
                   ) : (
                     <p className="text-muted-foreground italic">
                       {documentData.status === 'READY'
-                        ? 'OCR text will appear here once processing is complete'
+                        ? 'No OCR text is available for this page'
                         : 'Processing...'}
                     </p>
                   )}

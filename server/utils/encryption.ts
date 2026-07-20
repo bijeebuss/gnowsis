@@ -6,7 +6,7 @@ const AUTH_TAG_LENGTH = 16;
 
 function getEncryptionKey(): Buffer {
   const secret = process.env.ENCRYPTION_SECRET;
-  if (!secret || secret.length !== 64) {
+  if (!secret || !/^[0-9a-fA-F]{64}$/.test(secret)) {
     throw new Error('ENCRYPTION_SECRET must be 64 hex characters (32 bytes)');
   }
   return Buffer.from(secret, 'hex');

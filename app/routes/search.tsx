@@ -31,6 +31,7 @@ import {
 } from '../components/ui/select';
 import { Search as SearchIcon, ChevronLeft, ChevronRight } from 'lucide-react';
 import { authFetch } from '../utils/auth';
+import { HighlightedSnippet } from '../components/HighlightedSnippet';
 
 export const Route = createFileRoute('/search')({
   component: () => (
@@ -127,22 +128,6 @@ function SearchPage() {
     }
   }, [searchQuery, page, dateFrom, dateTo, documentType]);
 
-  const highlightSnippet = (snippet: string, query: string): JSX.Element => {
-    // Split query into terms
-    const terms = query.toLowerCase().split(/\s+/);
-    let highlightedSnippet = snippet;
-
-    // Highlight each term
-    terms.forEach((term) => {
-      if (term.length > 2) {
-        const regex = new RegExp(`(${term})`, 'gi');
-        highlightedSnippet = highlightedSnippet.replace(regex, '<mark>$1</mark>');
-      }
-    });
-
-    return <span dangerouslySetInnerHTML={{ __html: highlightedSnippet }} />;
-  };
-
   const formatDate = (dateString: string): string => {
     const date = new Date(dateString);
     return date.toLocaleDateString('en-US', {
@@ -205,12 +190,15 @@ function SearchPage() {
               {/* Document Type */}
               <div className="space-y-2">
                 <Label htmlFor="doc-type">Document Type</Label>
-                <Select value={documentType} onValueChange={setDocumentType}>
+                <Select
+                  value={documentType || 'all'}
+                  onValueChange={(value) => setDocumentType(value === 'all' ? '' : value)}
+                >
                   <SelectTrigger id="doc-type">
                     <SelectValue placeholder="All types" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All types</SelectItem>
+                    <SelectItem value="all">All types</SelectItem>
                     <SelectItem value="application/pdf">PDF</SelectItem>
                     <SelectItem value="image/png">PNG</SelectItem>
                     <SelectItem value="image/jpeg">JPG</SelectItem>
@@ -287,7 +275,7 @@ function SearchPage() {
                           </CardTitle>
                           <CardDescription className="mt-1">
                             <span className="text-xs">
-                              {formatDate(result.upload_date)} • Page {result.page_number + 1} • Relevance: {(result.relevance_score * 100).toFixed(0)}%
+                              {formatDate(result.upload_date)} • {result.page_number < 0 ? 'Title / notes' : `Page ${result.page_number + 1}`} • Relevance: {(result.relevance_score * 100).toFixed(0)}%
                             </span>
                           </CardDescription>
                         </div>
@@ -295,7 +283,7 @@ function SearchPage() {
                     </CardHeader>
                     <CardContent>
                       <p className="text-sm text-foreground search-snippet">
-                        ...{highlightSnippet(result.snippet, searchQuery)}...
+                        <HighlightedSnippet snippet={result.snippet} query={searchQuery} />
                       </p>
                     </CardContent>
                   </Card>

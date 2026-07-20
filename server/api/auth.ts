@@ -2,6 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import { prisma } from "../db.js";
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { requireAuth, type AuthRequest } from '../middleware/auth.js';
+import { Prisma } from '@prisma/client';
 
 const router = Router();
 // Use shared Prisma client from db.ts
@@ -43,12 +45,14 @@ router.post('/signup', async (req: Request, res: Response) => {
     const { email, password } = req.body;
 
     // Validate required fields
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Validate email format
-    if (!EMAIL_REGEX.test(email)) {
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
       return res.status(400).json({ error: 'Invalid email format' });
     }
 
@@ -59,8 +63,8 @@ router.post('/signup', async (req: Request, res: Response) => {
     }
 
     // Check if user already exists
-    const existingUser = await prisma.users.findUnique({
-      where: { email }
+    const existingUser = await prisma.users.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } }
     });
 
     if (existingUser) {
@@ -73,7 +77,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     // Create user in Users table
     const user = await prisma.users.create({
       data: {
-        email,
+        email: normalizedEmail,
         password_hash
       },
       select: {
@@ -88,6 +92,9 @@ router.post('/signup', async (req: Request, res: Response) => {
     return res.status(201).json(user);
   } catch (error) {
     console.error('Signup error:', error);
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return res.status(409).json({ error: 'User with this email already exists' });
+    }
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -97,9 +104,8 @@ router.post('/signup', async (req: Request, res: Response) => {
  * Accept JSON body: { email, password }
  * Query Users table for email
  * Verify password with bcrypt.compare
- * Generate JWT token with payload: { user_id, exp: 6 months }
- * Set httpOnly secure cookie with token
- * Return 200 OK with token and user info
+ * Generate a revocable, 24-hour JWT and set it as an httpOnly cookie
+ * Return 200 OK with user info
  * Return 401 Unauthorized if credentials invalid
  */
 router.post('/login', async (req: Request, res: Response) => {
@@ -107,13 +113,15 @@ router.post('/login', async (req: Request, res: Response) => {
     const { email, password } = req.body;
 
     // Validate required fields
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Query Users table for email
-    const user = await prisma.users.findUnique({
-      where: { email }
+    const user = await prisma.users.findFirst({
+      where: { email: { equals: normalizedEmail, mode: 'insensitive' } }
     });
 
     if (!user) {
@@ -127,7 +135,7 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Generate JWT token with 6 month expiration
+    // Generate a short-lived JWT. token_version makes logout revocable server-side.
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
       console.error('JWT_SECRET is not configured');
@@ -135,22 +143,21 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     const token = jwt.sign(
-      { user_id: user.id },
+      { user_id: user.id, token_version: user.token_version },
       jwtSecret,
-      { expiresIn: '180d' }
+      { expiresIn: '24h', algorithm: 'HS256' }
     );
 
     // Set httpOnly secure cookie with token
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 180 * 24 * 60 * 60 * 1000, // 6 months in milliseconds
+      maxAge: 24 * 60 * 60 * 1000,
       sameSite: 'strict'
     });
 
-    // Return 200 OK with token and user info
+    // Keep the bearer token out of JavaScript; the httpOnly cookie is authoritative.
     return res.status(200).json({
-      token,
       user: {
         id: user.id,
         email: user.email,
@@ -168,15 +175,35 @@ router.post('/login', async (req: Request, res: Response) => {
  * Clear session cookie
  * Return 200 OK
  */
-router.post('/logout', (req: Request, res: Response) => {
-  // Clear the token cookie
+router.post('/logout', (_req, res, next) => {
+  // Clear even an expired or otherwise invalid cookie before auth rejects it.
   res.clearCookie('token', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'strict'
   });
-
+  next();
+}, requireAuth, async (req: AuthRequest, res: Response) => {
+  if (req.user_id) {
+    await prisma.users.update({
+      where: { id: req.user_id },
+      data: { token_version: { increment: 1 } },
+    });
+  }
   return res.status(200).json({ message: 'Logged out successfully' });
+});
+
+router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
+  const user = await prisma.users.findUnique({
+    where: { id: req.user_id! },
+    select: { id: true, email: true, created_at: true },
+  });
+
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  return res.status(200).json({ user });
 });
 
 export default router;

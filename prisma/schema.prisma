@@ -2,12 +2,12 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
+  provider   = "postgresql"
   extensions = [vector]
 }
 
@@ -36,15 +36,17 @@ model Users {
   password_hash String
   created_at    DateTime @default(now())
   updated_at    DateTime @updatedAt
+  token_version Int      @default(0)
 
   // Email ingestion settings
-  imap_enabled            Boolean  @default(false)
+  imap_enabled            Boolean @default(false)
   imap_server             String?
   imap_port               Int?
   imap_username           String?
   imap_password_encrypted String?
-  imap_folder             String?  @default("INBOX")
+  imap_folder             String? @default("INBOX")
   imap_last_uid           Int?
+  imap_uid_validity       String?
 
   // Relations
   documents Documents[]
@@ -66,6 +68,7 @@ model Documents {
   file_path         String
   file_size         Int
   file_type         String
+  source_key        String?        @unique
   status            DocumentStatus @default(UPLOADED)
   upload_date       DateTime       @default(now())
   updated_at        DateTime       @updatedAt
@@ -76,20 +79,38 @@ model Documents {
   vectors          Vectors[]
   tags             DocumentTags[]
   metadata         MetadataFields[]
+  files            DocumentFiles[]
 
   @@index([user_id, upload_date])
   @@map("documents")
 }
 
+model DocumentFiles {
+  id                String @id @default(uuid())
+  document_id       String
+  position          Int
+  filename          String
+  original_filename String
+  file_path         String
+  file_size         Int
+  file_type         String
+
+  document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
+
+  @@unique([document_id, position])
+  @@index([document_id])
+  @@map("document_files")
+}
+
 // ProcessingStatus Model
 model ProcessingStatus {
-  id             String           @id @default(uuid())
-  document_id    String
-  stage          ProcessingStage
-  started_at     DateTime         @default(now())
-  completed_at   DateTime?
-  error_message  String?
-  retry_count    Int              @default(0)
+  id            String          @id @default(uuid())
+  document_id   String
+  stage         ProcessingStage
+  started_at    DateTime        @default(now())
+  completed_at  DateTime?
+  error_message String?
+  retry_count   Int             @default(0)
 
   // Relations
   document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
@@ -100,26 +121,27 @@ model ProcessingStatus {
 
 // Vectors Model
 model Vectors {
-  id             String                         @id @default(uuid())
-  document_id    String
-  page_number    Int
-  dense_vector   Unsupported("vector(1536)")?
-  sparse_vector  Json?
-  text_content   String
+  id            String                       @id @default(uuid())
+  document_id   String
+  page_number   Int
+  dense_vector  Unsupported("vector(1024)")?
+  sparse_vector Json?
+  text_content  String
 
   // Relations
   document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
 
+  @@unique([document_id, page_number])
   @@index([document_id])
   @@map("vectors")
 }
 
 // Tags Model
 model Tags {
-  id          String   @id @default(uuid())
-  name        String
-  user_id     String
-  created_at  DateTime @default(now())
+  id         String   @id @default(uuid())
+  name       String
+  user_id    String
+  created_at DateTime @default(now())
 
   // Relations
   user         Users          @relation(fields: [user_id], references: [id], onDelete: Cascade)
@@ -153,6 +175,7 @@ model MetadataFields {
   // Relations
   document Documents @relation(fields: [document_id], references: [id], onDelete: Cascade)
 
+  @@unique([document_id, field_name])
   @@index([document_id])
   @@map("metadata_fields")
 }

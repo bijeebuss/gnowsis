@@ -50,10 +50,17 @@ router.post('/test', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { server, port, username, password, folder } = req.body;
 
-    if (!server || !username || !password) {
+    if (typeof server !== 'string' || typeof username !== 'string' || typeof password !== 'string' ||
+        !server.trim() || !username.trim() || !password) {
       return res.status(400).json({
         error: 'Server, username, and password are required'
       });
+    }
+    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      return res.status(400).json({ error: 'Port must be an integer between 1 and 65535' });
+    }
+    if (folder !== undefined && typeof folder !== 'string') {
+      return res.status(400).json({ error: 'Folder must be a string' });
     }
 
     client = new ImapFlow({
@@ -115,6 +122,22 @@ router.put('/', requireAuth, async (req: AuthRequest, res: Response) => {
       password,
       folder
     } = req.body;
+
+    if (server !== undefined && typeof server !== 'string') {
+      return res.status(400).json({ error: 'Server must be a string' });
+    }
+    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      return res.status(400).json({ error: 'Port must be an integer between 1 and 65535' });
+    }
+    if (username !== undefined && typeof username !== 'string') {
+      return res.status(400).json({ error: 'Username must be a string' });
+    }
+    if (password !== undefined && typeof password !== 'string') {
+      return res.status(400).json({ error: 'Password must be a string' });
+    }
+    if (folder !== undefined && typeof folder !== 'string') {
+      return res.status(400).json({ error: 'Folder must be a string' });
+    }
 
     const updateData: any = {};
 
@@ -182,6 +205,7 @@ router.delete('/', requireAuth, async (req: AuthRequest, res: Response) => {
         imap_password_encrypted: null,
         imap_folder: null,
         imap_last_uid: null,
+        imap_uid_validity: null,
       }
     });
 

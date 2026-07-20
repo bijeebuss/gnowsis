@@ -20,10 +20,6 @@ export default defineConfig({
         target: apiUrl,
         changeOrigin: true,
       },
-      '/uploads': {
-        target: apiUrl,
-        changeOrigin: true,
-      },
     },
   },
 })

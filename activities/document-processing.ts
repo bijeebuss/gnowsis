@@ -1,26 +1,12 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { generateDenseVector } from '../server/utils/embeddings.js';
 import { generateSparseVector } from '../server/utils/sparse-vectors.js';
+import { pool, prisma } from '../server/db.js';
 
-const execAsync = promisify(exec);
-
-// Create PostgreSQL connection pool with explicit parameters
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_NAME || 'tldr',
-});
-
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const execFileAsync = promisify(execFile);
 
 /**
  * Convert PDF to images or copy image file to pages directory
@@ -56,44 +42,50 @@ export async function convertPdfToImages(
     const imagePaths: string[] = [];
 
     if (fileExt === '.pdf') {
-      // Convert PDF to PNG images using ImageMagick with OCR-optimized settings
-      // Process page-by-page to avoid memory exhaustion on large PDFs
-
-      // ImageMagick command with optimal OCR settings:
-      // -density 300: High resolution (300 DPI) for better OCR accuracy
-      // -depth 8: 8-bit color depth (standard for images)
-      // -quality 100: Maximum quality output
-      // -alpha remove: Remove transparency (white background)
-      // -background white: Set white background when removing alpha
-      // -sharpen 0x1: Slight sharpening to enhance text edges
-      // -contrast-stretch 0: Normalize contrast across the image
-      const magickArgs = [
-        '-density 300',
-        '-depth 8',
-        '-quality 100',
-        '-alpha remove',
-        '-background white',
-        '-sharpen 0x1',
-        '-contrast-stretch 0',
-      ].join(' ');
-
-      // First, get the number of pages in the PDF
-      const { stdout } = await execAsync(`identify -format "%n\n" "${filePath}"`);
-      const pageCount = parseInt(stdout.trim().split('\n')[0] || '1');
+      // Poppler handles large and unusually proportioned pages more predictably
+      // than ImageMagick. Normal pages stay at 300 DPI for OCR quality, while
+      // long-edge and pixel-area caps prevent cache or memory exhaustion.
+      const { stdout: documentInfo } = await execFileAsync('pdfinfo', [filePath]);
+      const pageCount = Number.parseInt(documentInfo.match(/^Pages:\s+(\d+)$/m)?.[1] || '', 10);
+      if (!Number.isInteger(pageCount) || pageCount < 1) {
+        throw new Error('PDF has no readable pages');
+      }
 
       // Process each page individually to avoid memory exhaustion
       for (let pageNum = 0; pageNum < pageCount; pageNum++) {
         const outputPath = path.join(pagesDir, `page-${pageOffset + pageNum}.png`);
 
-        // Convert specific page: [pageNum] selects the page (0-indexed)
-        await execAsync(`convert ${magickArgs} "${filePath}[${pageNum}]" "${outputPath}"`);
+        const selectedPage = String(pageNum + 1);
+        const { stdout: pageInfo } = await execFileAsync(
+          'pdfinfo',
+          ['-f', selectedPage, '-l', selectedPage, filePath],
+        );
+        const sizeMatch = pageInfo.match(/^Page(?:\s+\d+)?\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts/m);
+        if (!sizeMatch) throw new Error('Could not determine PDF page dimensions');
+        const widthPoints = Number(sizeMatch[1]);
+        const heightPoints = Number(sizeMatch[2]);
+        const longestEdgeDpi = (12_000 * 72) / Math.max(widthPoints, heightPoints);
+        const pixelAreaDpi = Math.sqrt((20_000_000 * 72 * 72) / (widthPoints * heightPoints));
+        const density = Math.max(10, Math.floor(Math.min(300, longestEdgeDpi, pixelAreaDpi)));
+        const outputPrefix = outputPath.replace(/\.png$/i, '');
+
+        await execFileAsync('pdftoppm', [
+          '-f', selectedPage,
+          '-l', selectedPage,
+          '-singlefile',
+          '-r', String(density),
+          '-png',
+          filePath,
+          outputPrefix,
+        ]);
 
         imagePaths.push(outputPath);
       }
     } else if (fileExt === '.png' || fileExt === '.jpg' || fileExt === '.jpeg') {
       // For image files, copy to pages directory without preprocessing
       // LLM-based OCR works better with original images
-      const targetPath = path.join(pagesDir, `page-${pageOffset}.png`);
+      const targetExtension = fileExt === '.png' ? 'png' : 'jpg';
+      const targetPath = path.join(pagesDir, `page-${pageOffset}.${targetExtension}`);
       await fs.copyFile(filePath, targetPath);
       imagePaths.push(targetPath);
     } else {
@@ -200,6 +192,35 @@ export async function completeOcrProcessing(documentId: string): Promise<void> {
 }
 
 /**
+ * Record a terminal OCR failure so the UI does not show processing forever.
+ */
+export async function failOcrProcessing(documentId: string, errorMessage: string): Promise<void> {
+  const statusRecord = await prisma.processingStatus.findFirst({
+    where: {
+      document_id: documentId,
+      stage: 'OCR_EXTRACTION',
+    },
+    orderBy: { started_at: 'desc' },
+  });
+
+  await prisma.$transaction([
+    prisma.documents.update({
+      where: { id: documentId },
+      data: { status: 'ERROR' },
+    }),
+    ...(statusRecord
+      ? [prisma.processingStatus.update({
+          where: { id: statusRecord.id },
+          data: {
+            error_message: errorMessage.slice(0, 2000),
+            retry_count: { increment: 1 },
+          },
+        })]
+      : []),
+  ]);
+}
+
+/**
  * Extract text from a single page image using OpenAI Vision API
  * This is an activity that can be fanned out in parallel from the workflow
  * @param imagePath - Path to the image file
@@ -222,7 +243,7 @@ export async function extractTextFromPage(
 async function extractTextWithLLM(imagePath: string): Promise<string> {
   // Read environment variables at runtime (not at module load time)
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-  const OPENAI_API_ENDPOINT = process.env.OPENAI_API_ENDPOINT || 'https://api.openai.com/v1';
+  const OPENAI_API_ENDPOINT = (process.env.OPENAI_API_ENDPOINT || 'https://api.openai.com/v1').replace(/\/$/, '');
   const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
   if (!OPENAI_API_KEY) {
@@ -232,43 +253,63 @@ async function extractTextWithLLM(imagePath: string): Promise<string> {
   // Read image file and convert to base64
   const imageBuffer = await fs.readFile(imagePath);
   const base64Image = imageBuffer.toString('base64');
-  const imageExt = path.extname(imagePath).toLowerCase().substring(1);
-  const mimeType = imageExt === 'png' ? 'image/png' : 'image/jpeg';
+  // Verify the image signature rather than trusting only the file extension.
+  const isPng = imageBuffer.subarray(0, 8).equals(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  );
+  const isJpeg = imageBuffer[0] === 0xff && imageBuffer[1] === 0xd8 && imageBuffer[2] === 0xff;
+
+  if (!isPng && !isJpeg) {
+    throw new Error(`Unsupported image data in ${imagePath}`);
+  }
+
+  const mimeType = isPng ? 'image/png' : 'image/jpeg';
 
   console.log(`Processing image: ${imagePath} (${mimeType})`);
 
-  // Call OpenAI Chat Completions API with vision
+  const requestBody: Record<string, unknown> = {
+    model: OPENAI_MODEL,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+`Extract all visible text from this image.
+Return the text content, preserving the layout and structure as much as possible.
+Include all text you can see, regardless of color, size, or position.
+Also output a short description 100 characters or less of the image content at the end.`,
+          },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${mimeType};base64,${base64Image}`,
+            },
+          },
+        ],
+      },
+    ],
+    max_tokens: 4096,
+  };
+
+  // OpenRouter will reject the request rather than route image data to a
+  // provider that does not support Zero Data Retention.
+  if (new URL(OPENAI_API_ENDPOINT).hostname === 'openrouter.ai') {
+    requestBody.provider = {
+      zdr: true,
+      data_collection: 'deny',
+    };
+  }
+
+  // Call the configured OpenAI-compatible Chat Completions API with vision.
   const response = await fetch(`${OPENAI_API_ENDPOINT}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${OPENAI_API_KEY}`,
     },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: 
-`Extract all visible text from this image.
-Return the text content, preserving the layout and structure as much as possible.
-Include all text you can see, regardless of color, size, or position.
-Also output a short description 100 characters or less of the image content at the end.`,
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:${mimeType};base64,${base64Image}`,
-              },
-            },
-          ],
-        },
-      ],
-      max_tokens: 4096,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -300,10 +341,23 @@ export async function generateVectors(
       },
     });
 
+    const generatedPages: Array<{
+      pageNumber: number;
+      denseVector: string | null;
+      sparseVector: string | null;
+      text: string;
+    }> = [];
+
     for (const page of textPages) {
-      // Skip empty pages
+      // Preserve empty page rows for viewer page counts, but do not make them
+      // search candidates or send empty content to the embedding provider.
       if (!page.text.trim()) {
-        console.log(`Skipping empty page ${page.pageNumber} for document ${documentId}`);
+        generatedPages.push({
+          pageNumber: page.pageNumber,
+          denseVector: null,
+          sparseVector: null,
+          text: '',
+        });
         continue;
       }
 
@@ -314,14 +368,35 @@ export async function generateVectors(
       const sparseVector = generateSparseVector(page.text);
 
       // Format dense vector as pgvector string: [val1,val2,val3,...]
-      const denseVectorStr = `[${denseVector.join(',')}]`;
+      generatedPages.push({
+        pageNumber: page.pageNumber,
+        denseVector: `[${denseVector.join(',')}]`,
+        sparseVector: JSON.stringify(sparseVector),
+        text: page.text,
+      });
+    }
 
-      // Store vectors in database using raw SQL for pgvector support
-      await pool.query(
-        `INSERT INTO vectors (id, document_id, page_number, dense_vector, sparse_vector, text_content)
-         VALUES (gen_random_uuid(), $1::uuid, $2, $3::vector, $4::jsonb, $5)`,
-        [documentId, page.pageNumber, denseVectorStr, JSON.stringify(sparseVector), page.text]
-      );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM vectors WHERE document_id = $1', [documentId]);
+      for (const page of generatedPages) {
+        await client.query(
+          `INSERT INTO vectors (id, document_id, page_number, dense_vector, sparse_vector, text_content)
+           VALUES (gen_random_uuid()::text, $1, $2, $3::vector, $4::jsonb, $5)
+           ON CONFLICT (document_id, page_number) DO UPDATE SET
+             dense_vector = EXCLUDED.dense_vector,
+             sparse_vector = EXCLUDED.sparse_vector,
+             text_content = EXCLUDED.text_content`,
+          [documentId, page.pageNumber, page.denseVector, page.sparseVector, page.text]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
 
     // Update completion timestamp

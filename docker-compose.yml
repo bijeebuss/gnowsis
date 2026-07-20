@@ -1,7 +1,7 @@
 services:
   # PostgreSQL with pgvector extension
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     container_name: tldr-postgres
     restart: unless-stopped
     environment:
@@ -37,15 +37,29 @@ services:
       retries: 10
       start_period: 30s
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migration
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-tldr}?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Application Server (API + Frontend)
   app:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     container_name: tldr-app
     restart: unless-stopped
-    command: >
-      sh -c "npx prisma migrate deploy && npm run api"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    command: npm run api
     environment:
       DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-tldr}?schema=public
       DB_HOST: postgres
@@ -60,6 +74,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_API_ENDPOINT: ${OPENAI_API_ENDPOINT:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-baai/bge-m3}
       PORT: "3000"
       NODE_ENV: ${NODE_ENV:-production}
     ports:
@@ -71,14 +86,20 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
   # Combined Worker (Document + Email Processing)
   worker:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     container_name: tldr-worker
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
     command: npm run combined-worker
     environment:
       DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-tldr}?schema=public
@@ -93,6 +114,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_API_ENDPOINT: ${OPENAI_API_ENDPOINT:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-baai/bge-m3}
       NODE_ENV: ${NODE_ENV:-production}
     volumes:
       - ./uploads:/app/uploads
@@ -101,10 +123,12 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
   # Gotenberg - PDF conversion service (optional but recommended)
   gotenberg:
-    image: gotenberg/gotenberg:8
+    image: gotenberg/gotenberg:8@sha256:67097317623a503ba2a6a7e9ae8db6929a1f7e1bbd88077bacf2d325fbdab923
     container_name: tldr-gotenberg
     restart: unless-stopped
     # ports:
@@ -119,7 +143,7 @@ services:
 
   # Ollama - Local LLM with GPU support (optional)
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
     container_name: tldr-ollama
     restart: unless-stopped
     # ports:

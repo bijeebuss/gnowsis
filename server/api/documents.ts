@@ -5,9 +5,10 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import { createReadStream } from 'fs';
+import archiver from 'archiver';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
-import { startDocumentProcessing } from '../../workflows/client.js';
-import { hybridSearch, getSearchResultCount, updateMetadataVector, type SearchFilters } from '../utils/search.js';
+import { getWorkflowHandle, startDocumentProcessing } from '../../workflows/client.js';
+import { hybridSearch, updateDocumentMetadata, type SearchFilters } from '../utils/search.js';
 
 const router = Router();
 // Use shared Prisma client from db.ts
@@ -46,6 +47,12 @@ function getFileExtension(mimeType: string): string {
   return mimeToExt[mimeType] || 'bin';
 }
 
+function isValidDateFilter(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 /**
  * POST /api/documents/upload
  * Accept multipart/form-data with multiple files, title, notes, and tags
@@ -61,6 +68,7 @@ function getFileExtension(mimeType: string): string {
  * Return 201 Created with JSON: { id, title, upload_date, status }
  */
 router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthRequest, res: Response) => {
+  let uploadDir: string | undefined;
   try {
     const files = req.files as Express.Multer.File[];
     const userId = req.user_id;
@@ -89,11 +97,19 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
     const documentId = uuidv4();
 
     // Create uploads directory structure
-    const uploadDir = path.join(process.cwd(), 'uploads', documentId);
+    uploadDir = path.join(process.cwd(), 'uploads', documentId);
     await fs.mkdir(uploadDir, { recursive: true });
 
     // Save all files to disk
     const filePaths: string[] = [];
+    const storedFiles: Array<{
+      position: number;
+      filename: string;
+      original_filename: string;
+      file_path: string;
+      file_size: number;
+      file_type: string;
+    }> = [];
     let totalSize = 0;
     let combinedFilename = '';
 
@@ -115,6 +131,14 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
 
       await fs.writeFile(filePath, file.buffer);
       filePaths.push(filePath);
+      storedFiles.push({
+        position: i,
+        filename,
+        original_filename: file.originalname,
+        file_path: filePath,
+        file_size: file.size,
+        file_type: file.mimetype,
+      });
     }
 
     if (filePaths.length === 0 || !files[0]) {
@@ -125,58 +149,39 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
     const primaryFileType = files[0].mimetype;
 
     // Create Documents record with status UPLOADED
-    const document = await prisma.documents.create({
-      data: {
-        id: documentId,
-        user_id: userId,
-        ...(title ? { title } : {}),
-        ...(notes ? { notes } : {}),
-        filename: `file-0.${getFileExtension(primaryFileType)}`,
-        original_filename: combinedFilename,
-        file_path: filePaths[0]!, // Primary file path (guaranteed to exist by check above)
-        file_size: totalSize,
-        file_type: primaryFileType,
-        status: 'UPLOADED'
+    const tagNames = tagsString?.split(',').map(t => t.trim()).filter(Boolean) ?? [];
+    const document = await prisma.$transaction(async (tx) => {
+      const created = await tx.documents.create({
+        data: {
+          id: documentId,
+          user_id: userId,
+          ...(title ? { title } : {}),
+          ...(notes ? { notes } : {}),
+          filename: `file-0.${getFileExtension(primaryFileType)}`,
+          original_filename: combinedFilename,
+          file_path: filePaths[0]!,
+          file_size: totalSize,
+          file_type: primaryFileType,
+          status: 'UPLOADED',
+          files: { create: storedFiles },
+        }
+      });
+
+      for (const tagName of new Set(tagNames)) {
+        const tag = await tx.tags.upsert({
+          where: { name_user_id: { name: tagName, user_id: userId } },
+          update: {},
+          create: { name: tagName, user_id: userId },
+        });
+        await tx.documentTags.create({
+          data: { document_id: documentId, tag_id: tag.id },
+        });
       }
+      return created;
     });
 
-    // Create tag associations if tags provided
-    if (tagsString && tagsString.trim()) {
-      const tagNames = tagsString.split(',').map(t => t.trim()).filter(t => t.length > 0);
-
-      for (const tagName of tagNames) {
-        // Find or create tag
-        let tag = await prisma.tags.findUnique({
-          where: {
-            name_user_id: {
-              name: tagName,
-              user_id: userId
-            }
-          }
-        });
-
-        if (!tag) {
-          tag = await prisma.tags.create({
-            data: {
-              name: tagName,
-              user_id: userId
-            }
-          });
-        }
-
-        // Create document-tag association
-        await prisma.documentTags.create({
-          data: {
-            document_id: documentId,
-            tag_id: tag.id
-          }
-        }).catch(() => {
-          // Ignore duplicate errors
-        });
-      }
-    }
-
     // Initiate Temporal workflow for document processing
+    let responseStatus = document.status;
     try {
       await startDocumentProcessing(documentId, filePaths, title || undefined, notes || undefined);
     } catch (workflowError) {
@@ -186,6 +191,7 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
         where: { id: documentId },
         data: { status: 'ERROR' }
       });
+      responseStatus = 'ERROR';
     }
 
     // Return 201 Created with document info
@@ -194,7 +200,7 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
       title: document.title || document.original_filename,
       filename: document.original_filename,
       upload_date: document.upload_date,
-      status: document.status
+      status: responseStatus
     });
   } catch (error: any) {
     console.error('Upload error:', error);
@@ -204,8 +210,44 @@ router.post('/upload', requireAuth, upload.array('files', 10), async (req: AuthR
       return res.status(413).json({ error: 'File size exceeds maximum limit of 1GB' });
     }
 
+    if (uploadDir) {
+      await fs.rm(uploadDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+
     return res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+/** Authenticated access to a rendered document page. */
+router.get('/:id/pages/:page', requireAuth, async (req: AuthRequest, res: Response) => {
+  const documentId = req.params.id;
+  const pageRaw = req.params.page;
+  const userId = req.user_id;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!documentId || Array.isArray(documentId) || !pageRaw || Array.isArray(pageRaw) || !/^\d+$/.test(pageRaw)) {
+    return res.status(400).json({ error: 'Invalid document or page number' });
+  }
+
+  const document = await prisma.documents.findFirst({
+    where: { id: documentId, user_id: userId },
+    select: { id: true },
+  });
+  if (!document) return res.status(404).json({ error: 'Document not found' });
+
+  const pagesDir = path.join(process.cwd(), 'uploads', document.id, 'pages');
+  const candidates = [
+    { path: path.join(pagesDir, `page-${pageRaw}.png`), type: 'image/png' },
+    { path: path.join(pagesDir, `page-${pageRaw}.jpg`), type: 'image/jpeg' },
+  ];
+  const pageFile = await Promise.all(candidates.map(async candidate =>
+    fs.access(candidate.path).then(() => candidate).catch(() => null)
+  )).then(results => results.find(Boolean));
+
+  if (!pageFile) return res.status(404).json({ error: 'Page image not found' });
+  res.setHeader('Content-Type', pageFile.type);
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  createReadStream(pageFile.path).pipe(res);
+  return;
 });
 
 /**
@@ -245,31 +287,23 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     const orderByField = validSortFields.includes(sortBy) ? sortBy : 'upload_date';
     const orderDirection = validOrders.includes(order) ? order : 'desc';
 
-    // Get total count for pagination
-    const total = await prisma.documents.count({
-      where: {
-        user_id: userId
-      }
-    });
-
-    // Query documents with tags and pagination
-    const documents = await prisma.documents.findMany({
-      where: {
-        user_id: userId
-      },
-      include: {
-        tags: {
-          include: {
-            tag: true
+    const [total, storage, documents] = await Promise.all([
+      prisma.documents.count({ where: { user_id: userId } }),
+      prisma.documents.aggregate({ where: { user_id: userId }, _sum: { file_size: true } }),
+      prisma.documents.findMany({
+        where: { user_id: userId },
+        include: {
+          tags: {
+            include: {
+              tag: true
+            }
           }
-        }
-      },
-      orderBy: {
-        [orderByField]: orderDirection
-      },
-      skip: (page - 1) * perPage,
-      take: perPage
-    });
+        },
+        orderBy: { [orderByField]: orderDirection },
+        skip: (page - 1) * perPage,
+        take: perPage
+      }),
+    ]);
 
     // Format response to include tags array
     const formattedDocuments = documents.map(doc => ({
@@ -292,6 +326,7 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
       page,
       per_page: perPage,
       total,
+      total_storage: storage._sum.file_size ?? 0,
       total_pages: Math.ceil(total / perPage)
     });
   } catch (error) {
@@ -327,12 +362,18 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response) => {
     // Parse filters
     const filters: SearchFilters = {};
 
-    if (req.query.date_from) {
-      filters.date_from = req.query.date_from as string;
+    if (req.query.date_from !== undefined) {
+      if (!isValidDateFilter(req.query.date_from)) {
+        return res.status(400).json({ error: 'date_from must be a valid YYYY-MM-DD date' });
+      }
+      filters.date_from = req.query.date_from;
     }
 
-    if (req.query.date_to) {
-      filters.date_to = req.query.date_to as string;
+    if (req.query.date_to !== undefined) {
+      if (!isValidDateFilter(req.query.date_to)) {
+        return res.status(400).json({ error: 'date_to must be a valid YYYY-MM-DD date' });
+      }
+      filters.date_to = req.query.date_to;
     }
 
     if (req.query.document_type) {
@@ -356,18 +397,10 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response) => {
     }
 
     // Execute hybrid search
-    const allResults = await hybridSearch(query, userId, filters);
-
-    // Get total count for pagination
-    const total = allResults.length;
-
-    // Apply pagination
-    const startIndex = (page - 1) * perPage;
-    const endIndex = startIndex + perPage;
-    const paginatedResults = allResults.slice(startIndex, endIndex);
+    const searchPage = await hybridSearch(query, userId, filters, page, perPage);
 
     // Format results
-    const formattedResults = paginatedResults.map(result => ({
+    const formattedResults = searchPage.results.map(result => ({
       document_id: result.document_id,
       filename: result.filename,
       upload_date: result.upload_date,
@@ -382,8 +415,8 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response) => {
       results: formattedResults,
       page: page,
       per_page: perPage,
-      total: total,
-      total_pages: Math.ceil(total / perPage),
+      total: searchPage.total,
+      total_pages: Math.ceil(searchPage.total / perPage),
     });
   } catch (error) {
     console.error('Search error:', error);
@@ -505,7 +538,8 @@ router.get('/:id/download', requireAuth, async (req: AuthRequest, res: Response)
 
     // Query document
     const document = await prisma.documents.findUnique({
-      where: { id: documentId }
+      where: { id: documentId },
+      include: { files: { orderBy: { position: 'asc' } } },
     });
 
     // Check if document exists
@@ -518,19 +552,46 @@ router.get('/:id/download', requireAuth, async (req: AuthRequest, res: Response)
       return res.status(403).json({ error: 'Forbidden: You do not have access to this document' });
     }
 
+    const documentFiles = document.files.length > 0 ? document.files : [{
+      file_path: document.file_path,
+      original_filename: document.original_filename,
+      file_type: document.file_type,
+    }];
+
+    if (documentFiles.length > 1) {
+      res.setHeader('Content-Disposition', `attachment; filename="${document.id}.zip"`);
+      res.setHeader('Content-Type', 'application/zip');
+      const archive = archiver('zip', { zlib: { level: 6 } });
+      archive.on('error', (error) => res.destroy(error));
+      archive.pipe(res);
+      const usedNames = new Set<string>();
+      for (const [index, file] of documentFiles.entries()) {
+        await fs.access(file.file_path);
+        const baseName = path.basename(file.original_filename).replace(/[\r\n]/g, '_') || `file-${index}`;
+        let archiveName = baseName;
+        if (usedNames.has(archiveName)) archiveName = `${index + 1}-${baseName}`;
+        usedNames.add(archiveName);
+        archive.file(file.file_path, { name: archiveName });
+      }
+      await archive.finalize();
+      return;
+    }
+
+    const primaryFile = documentFiles[0]!;
     // Check if file exists
     try {
-      await fs.access(document.file_path);
+      await fs.access(primaryFile.file_path);
     } catch {
       return res.status(404).json({ error: 'File not found on server' });
     }
 
     // Set Content-Disposition header with original filename
-    res.setHeader('Content-Disposition', `attachment; filename="${document.original_filename}"`);
-    res.setHeader('Content-Type', document.file_type);
+    const downloadName = path.basename(primaryFile.original_filename).replace(/[\r\n"]/g, '_');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.setHeader('Content-Type', primaryFile.file_type);
 
     // Stream file to response
-    const fileStream = createReadStream(document.file_path);
+    const fileStream = createReadStream(primaryFile.file_path);
     fileStream.pipe(res);
 
     fileStream.on('error', (error) => {
@@ -777,34 +838,18 @@ router.post('/:id/metadata', requireAuth, async (req: AuthRequest, res: Response
       return res.status(403).json({ error: 'Forbidden: You do not have access to this document' });
     }
 
-    // Check if metadata field already exists
-    const existingField = await prisma.metadataFields.findFirst({
+    const normalizedFieldName = field_name.trim();
+    const metadataField = await prisma.metadataFields.upsert({
       where: {
+        document_id_field_name: { document_id: documentId, field_name: normalizedFieldName },
+      },
+      update: { field_value: String(field_value) },
+      create: {
         document_id: documentId,
-        field_name: field_name.trim()
-      }
+        field_name: normalizedFieldName,
+        field_value: String(field_value),
+      },
     });
-
-    let metadataField;
-
-    if (existingField) {
-      // Update existing field
-      metadataField = await prisma.metadataFields.update({
-        where: { id: existingField.id },
-        data: {
-          field_value: String(field_value)
-        }
-      });
-    } else {
-      // Create new field
-      metadataField = await prisma.metadataFields.create({
-        data: {
-          document_id: documentId,
-          field_name: field_name.trim(),
-          field_value: String(field_value)
-        }
-      });
-    }
 
     // Return 201 Created with metadata object
     return res.status(201).json({
@@ -957,6 +1002,13 @@ router.put('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
     const documentIdRaw = req.params.id;
     const { notes, title } = req.body;
 
+    if (notes !== undefined && notes !== null && typeof notes !== 'string') {
+      return res.status(400).json({ error: 'notes must be a string or null' });
+    }
+    if (title !== undefined && title !== null && typeof title !== 'string') {
+      return res.status(400).json({ error: 'title must be a string or null' });
+    }
+
     if (!documentIdRaw || Array.isArray(documentIdRaw)) {
       return res.status(400).json({ error: 'Invalid Document ID' });
     }
@@ -976,14 +1028,14 @@ router.put('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Forbidden: You do not have access to this document' });
     }
 
-    // Update document
-    const updateData: any = {};
-    if (notes !== undefined) updateData.notes = notes;
-    if (title !== undefined) updateData.title = title;
+    const nextNotes = notes !== undefined ? notes : document.notes;
+    const nextTitle = title !== undefined ? title : document.title;
+    if (notes !== undefined || title !== undefined) {
+      await updateDocumentMetadata(documentId, nextTitle, nextNotes);
+    }
 
-    const updatedDocument: any = await prisma.documents.update({
+    const updatedDocument: any = await prisma.documents.findUnique({
       where: { id: documentId },
-      data: updateData,
       include: {
         tags: {
           include: {
@@ -998,11 +1050,6 @@ router.put('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
         }
       }
     });
-
-    // Update metadata vector (page -1) if title or notes changed
-    if (notes !== undefined || title !== undefined) {
-      await updateMetadataVector(documentId, updatedDocument.title, updatedDocument.notes);
-    }
 
     // Format response to match expected structure
     const formattedDocument = {
@@ -1069,15 +1116,22 @@ router.delete('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Forbidden: You do not have access to this document' });
     }
 
-    // Delete document files from disk
-    const documentDir = path.dirname(document.file_path);
-    if (await fs.access(documentDir).then(() => true).catch(() => false)) {
-      await fs.rm(documentDir, { recursive: true, force: true });
-    }
+    // Cancel in-flight processing before removing its database record.
+    await getWorkflowHandle(documentId).then(handle => handle.cancel()).catch(() => undefined);
 
-    // Delete document from database (cascading deletes will handle related records)
+    // Delete the database record first so a filesystem cleanup failure cannot leave
+    // an accessible document pointing at missing files.
+    const uploadsRoot = path.resolve(process.cwd(), 'uploads');
+    const documentDir = path.resolve(uploadsRoot, documentId);
+    if (path.dirname(documentDir) !== uploadsRoot) {
+      throw new Error('Refusing to delete a path outside the uploads directory');
+    }
     await prisma.documents.delete({
       where: { id: documentId },
+    });
+
+    await fs.rm(documentDir, { recursive: true, force: true }).catch((error) => {
+      console.error('Failed to clean up deleted document files:', error);
     });
 
     return res.status(204).send();

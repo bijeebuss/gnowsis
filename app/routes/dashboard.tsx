@@ -30,10 +30,43 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { UploadWidget } from '../components/UploadWidget';
-import { Upload, FileText, Search, X, Filter, ChevronDown, ChevronLeft, ChevronRight, Trash2, Settings } from 'lucide-react';
-import { getSession, authFetch } from '../utils/auth';
+import { Upload, FileText, Search, X, Filter, ChevronDown, ChevronLeft, ChevronRight, Trash2, Settings, LogOut } from 'lucide-react';
+import { authFetch, logout } from '../utils/auth';
+
+export interface DashboardSearchParams {
+  q?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  tags?: string[];
+}
+
+const parseSearchString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value : undefined;
+
+const parseSearchTags = (value: unknown): string[] | undefined => {
+  const tags = Array.isArray(value)
+    ? value.filter((tag): tag is string => typeof tag === 'string' && Boolean(tag))
+    : typeof value === 'string' && value
+      ? [value]
+      : [];
+
+  return tags.length > 0 ? tags : undefined;
+};
 
 export const Route = createFileRoute('/dashboard')({
+  validateSearch: (search: Record<string, unknown>): DashboardSearchParams => {
+    const q = parseSearchString(search.q);
+    const dateFrom = parseSearchString(search.dateFrom);
+    const dateTo = parseSearchString(search.dateTo);
+    const tags = parseSearchTags(search.tags);
+
+    return {
+      ...(q ? { q } : {}),
+      ...(dateFrom ? { dateFrom } : {}),
+      ...(dateTo ? { dateTo } : {}),
+      ...(tags ? { tags } : {}),
+    };
+  },
   component: () => (
     <ProtectedRoute>
       <DashboardPage />
@@ -69,11 +102,14 @@ interface Tag {
 }
 
 function DashboardPage() {
+  const navigate = Route.useNavigate();
+  const committedSearch = Route.useSearch();
+  const committedTagKey = (committedSearch.tags || []).join(',');
   const [documents, setDocuments] = useState<Document[]>([]);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSearching, setIsSearching] = useState(false);
+  const [isSearching, setIsSearching] = useState(Boolean(committedSearch.q));
   const [error, setError] = useState('');
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [sortBy, setSortBy] = useState<'upload_date' | 'filename'>('upload_date');
@@ -83,23 +119,19 @@ function DashboardPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalDocuments, setTotalDocuments] = useState(0);
+  const [totalStorage, setTotalStorage] = useState(0);
 
   // Search state
-  const [searchQuery, setSearchQuery] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [showFilters, setShowFilters] = useState(false);
-  const [isSearchMode, setIsSearchMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(committedSearch.q || '');
+  const [dateFrom, setDateFrom] = useState(committedSearch.dateFrom || '');
+  const [dateTo, setDateTo] = useState(committedSearch.dateTo || '');
+  const [selectedTags, setSelectedTags] = useState<string[]>(committedSearch.tags || []);
+  const [showFilters, setShowFilters] = useState(
+    Boolean(committedSearch.dateFrom || committedSearch.dateTo || committedSearch.tags?.length)
+  );
+  const isSearchMode = Boolean(committedSearch.q);
 
   const fetchDocuments = async (pageNum: number = page) => {
-    const token = getSession();
-    if (!token) {
-      setError('Not authenticated');
-      setIsLoading(false);
-      return;
-    }
-
     try {
       const response = await authFetch(
         `/api/documents?sort_by=${sortBy}&order=${order}&page=${pageNum}&per_page=25`
@@ -113,6 +145,7 @@ function DashboardPage() {
       setDocuments(data.documents);
       setTotalPages(data.total_pages);
       setTotalDocuments(data.total);
+      setTotalStorage(data.total_storage);
       setError('');
     } catch (err) {
       setError('Failed to load documents');
@@ -134,21 +167,16 @@ function DashboardPage() {
     }
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) {
-      setError('Please enter a search query');
-      return;
-    }
-
+  const performSearch = async (search: DashboardSearchParams) => {
     setIsSearching(true);
     setError('');
 
     try {
-      const params = new URLSearchParams({ q: searchQuery });
+      const params = new URLSearchParams({ q: search.q || '' });
 
-      if (dateFrom) params.append('date_from', dateFrom);
-      if (dateTo) params.append('date_to', dateTo);
-      selectedTags.forEach(tagId => params.append('tags', tagId));
+      if (search.dateFrom) params.append('date_from', search.dateFrom);
+      if (search.dateTo) params.append('date_to', search.dateTo);
+      search.tags?.forEach(tagId => params.append('tags', tagId));
 
       const response = await authFetch(`/api/documents/search?${params}`);
 
@@ -158,7 +186,6 @@ function DashboardPage() {
 
       const data = await response.json();
       setSearchResults(data.results || []);
-      setIsSearchMode(true);
     } catch (err) {
       setError('Failed to perform search');
       setSearchResults([]);
@@ -167,15 +194,42 @@ function DashboardPage() {
     }
   };
 
+  const handleSearch = () => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setError('Please enter a search query');
+      return;
+    }
+
+    const nextSearch: DashboardSearchParams = {
+      q,
+      ...(dateFrom ? { dateFrom } : {}),
+      ...(dateTo ? { dateTo } : {}),
+      ...(selectedTags.length > 0 ? { tags: selectedTags } : {}),
+    };
+    const isSameSearch =
+      committedSearch.q === nextSearch.q &&
+      committedSearch.dateFrom === nextSearch.dateFrom &&
+      committedSearch.dateTo === nextSearch.dateTo &&
+      committedTagKey === (nextSearch.tags || []).join(',');
+
+    if (isSameSearch) {
+      void performSearch(nextSearch);
+      return;
+    }
+
+    void navigate({ search: nextSearch });
+  };
+
   const handleClearSearch = () => {
     setSearchQuery('');
     setDateFrom('');
     setDateTo('');
     setSelectedTags([]);
     setSearchResults([]);
-    setIsSearchMode(false);
     setError('');
     setShowFilters(false);
+    void navigate({ search: {} });
   };
 
   const toggleTag = (tagId: string) => {
@@ -187,8 +241,29 @@ function DashboardPage() {
   };
 
   useEffect(() => {
-    fetchDocuments(page);
     fetchTags();
+  }, []);
+
+  useEffect(() => {
+    setSearchQuery(committedSearch.q || '');
+    setDateFrom(committedSearch.dateFrom || '');
+    setDateTo(committedSearch.dateTo || '');
+    setSelectedTags(committedSearch.tags || []);
+    setShowFilters(
+      Boolean(committedSearch.dateFrom || committedSearch.dateTo || committedSearch.tags?.length)
+    );
+
+    if (committedSearch.q) {
+      void performSearch(committedSearch);
+    } else {
+      setSearchResults([]);
+      setIsSearching(false);
+      setError('');
+    }
+  }, [committedSearch.q, committedSearch.dateFrom, committedSearch.dateTo, committedTagKey]);
+
+  useEffect(() => {
+    fetchDocuments(page);
 
     // Polling every 5 seconds for real-time status updates (only when not in search mode)
     const interval = setInterval(() => {
@@ -271,8 +346,6 @@ function DashboardPage() {
     });
   };
 
-  const totalStorage = documents.reduce((acc, doc) => acc + doc.file_size, 0);
-
   // Get document details for search results
   const getDocumentById = (id: string) => documents.find(doc => doc.id === id);
 
@@ -295,6 +368,10 @@ function DashboardPage() {
                   Settings
                 </Button>
               </Link>
+              <Button variant="outline" onClick={() => void logout()}>
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign out
+              </Button>
               <Button onClick={() => setIsUploadOpen(true)}>
                 <Upload className="w-4 h-4 mr-2" />
                 Upload Document
@@ -485,7 +562,7 @@ function DashboardPage() {
                               <CardDescription className="flex items-center gap-4 mt-2">
                                 <span>{formatDate(result.upload_date)}</span>
                                 <span>•</span>
-                                <span>Page {result.page_number + 1}</span>
+                                <span>{result.page_number < 0 ? 'Title / notes' : `Page ${result.page_number + 1}`}</span>
                                 <span>•</span>
                                 <Badge variant="outline">
                                   Score: {(result.relevance_score * 100).toFixed(1)}%
@@ -497,7 +574,7 @@ function DashboardPage() {
                         </CardHeader>
                         <CardContent>
                           <div className="bg-muted rounded p-3 text-sm">
-                            <p className="text-foreground line-clamp-3" dangerouslySetInnerHTML={{ __html: result.snippet }} />
+                            <p className="text-foreground line-clamp-3">{result.snippet}</p>
                           </div>
                           {doc && doc.tags.length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-3">
@@ -553,7 +630,7 @@ function DashboardPage() {
                       {/* Thumbnail */}
                       <div className="w-full h-40 bg-muted rounded-md flex items-center justify-center mb-3 overflow-hidden">
                         <img
-                          src={`/uploads/${doc.id}/pages/page-0.png`}
+                          src={`/api/documents/${doc.id}/pages/0`}
                           alt={doc.filename}
                           className="w-full h-full object-contain"
                           onError={(e) => {

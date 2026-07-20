@@ -1,7 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import fetch from 'node-fetch';
 import { prisma } from '../server/db.js';
 import { decryptPassword } from '../server/utils/encryption.js';
 
@@ -13,6 +12,11 @@ export interface EmailToProcess {
   uid: number;
   emailId: string;
   subject: string;
+}
+
+export interface EmailBatch {
+  emails: EmailToProcess[];
+  uidValidity: string;
 }
 
 export interface EmailMetadata {
@@ -38,7 +42,7 @@ export async function getAllEnabledUsers(): Promise<UserInfo[]> {
 /**
  * Get all new emails for a specific user
  */
-export async function getUserEmails(userId: string): Promise<EmailToProcess[]> {
+export async function getUserEmails(userId: string): Promise<EmailBatch> {
   const user = await prisma.users.findUnique({
     where: { id: userId },
     select: {
@@ -48,11 +52,12 @@ export async function getUserEmails(userId: string): Promise<EmailToProcess[]> {
       imap_password_encrypted: true,
       imap_folder: true,
       imap_last_uid: true,
+      imap_uid_validity: true,
     }
   });
 
   if (!user || !user.imap_server || !user.imap_password_encrypted) {
-    return [];
+    return { emails: [], uidValidity: '' };
   }
 
   const password = decryptPassword(user.imap_password_encrypted);
@@ -74,10 +79,15 @@ export async function getUserEmails(userId: string): Promise<EmailToProcess[]> {
     const lock = await client.getMailboxLock(user.imap_folder || 'INBOX');
 
     try {
+      if (!client.mailbox) {
+        throw new Error('IMAP mailbox was not selected');
+      }
+      const uidValidity = String(client.mailbox.uidValidity);
+      const lastUid = user.imap_uid_validity === uidValidity ? user.imap_last_uid : null;
       let searchCriteria;
-      if (user.imap_last_uid) {
-        searchCriteria = `${user.imap_last_uid + 1}:*`;
-        console.log(`Searching for UIDs > ${user.imap_last_uid} (query: "${searchCriteria}")`);
+      if (lastUid) {
+        searchCriteria = `${lastUid + 1}:*`;
+        console.log(`Searching for UIDs > ${lastUid} (query: "${searchCriteria}")`);
       } else {
         searchCriteria = '1:*';
         console.log(`First sync - searching for all emails`);
@@ -90,7 +100,7 @@ export async function getUserEmails(userId: string): Promise<EmailToProcess[]> {
 
         for await (const message of messages) {
           // Only include messages with UID greater than last_uid
-          if (!user.imap_last_uid || message.uid > user.imap_last_uid) {
+          if (!lastUid || message.uid > lastUid) {
             emailsToProcess.push({
               uid: message.uid,
               emailId: `${userId}-${message.uid}`,
@@ -102,13 +112,13 @@ export async function getUserEmails(userId: string): Promise<EmailToProcess[]> {
         // If the UID range is invalid (no messages in that range), return empty array
         if (fetchError.responseText && fetchError.responseText.includes('Invalid messageset')) {
           console.log(`No new messages found (UID range ${searchCriteria} is empty)`);
-          return [];
+          return { emails: [], uidValidity };
         }
         throw fetchError;
       }
 
       console.log(`Fetched ${emailsToProcess.length} emails after filtering`);
-      return emailsToProcess;
+      return { emails: emailsToProcess, uidValidity };
     } finally {
       lock.release();
     }
@@ -275,11 +285,15 @@ export async function convertHtmlToPdf(
  */
 export async function createDocumentRecord(
   userId: string,
-  subject: string
+  subject: string,
+  sourceKey: string,
 ): Promise<string> {
-  const document = await prisma.documents.create({
-    data: {
+  const document = await prisma.documents.upsert({
+    where: { source_key: sourceKey },
+    update: { title: subject, status: 'UPLOADED' },
+    create: {
       user_id: userId,
+      source_key: sourceKey,
       title: subject,
       filename: 'email.pdf',
       original_filename: `${subject}.pdf`,
@@ -302,13 +316,33 @@ export async function updateDocumentPath(
 ): Promise<void> {
   const stats = await fs.stat(pdfPath);
 
+  await prisma.$transaction(async (tx) => {
+    await tx.documents.update({
+      where: { id: documentId },
+      data: { file_path: pdfPath, file_size: stats.size },
+    });
+    await tx.documentFiles.upsert({
+      where: { document_id_position: { document_id: documentId, position: 0 } },
+      update: { file_path: pdfPath, file_size: stats.size },
+      create: {
+        document_id: documentId,
+        position: 0,
+        filename: 'email.pdf',
+        original_filename: 'email.pdf',
+        file_path: pdfPath,
+        file_size: stats.size,
+        file_type: 'application/pdf',
+      },
+    });
+  });
+}
+
+export async function failEmailDocument(documentId: string, message: string): Promise<void> {
   await prisma.documents.update({
     where: { id: documentId },
-    data: {
-      file_path: pdfPath,
-      file_size: stats.size,
-    }
+    data: { status: 'ERROR' },
   });
+  console.error(`Email document ${documentId} failed: ${message.slice(0, 500)}`);
 }
 
 /**
@@ -316,10 +350,11 @@ export async function updateDocumentPath(
  */
 export async function updateImapLastUid(
   userId: string,
-  uid: number
+  uid: number,
+  uidValidity: string,
 ): Promise<void> {
   await prisma.users.update({
     where: { id: userId },
-    data: { imap_last_uid: uid }
+    data: { imap_last_uid: uid, imap_uid_validity: uidValidity }
   });
 }

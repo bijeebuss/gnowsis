@@ -3,6 +3,10 @@ import ReactDOM from 'react-dom/client'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
 import './styles/globals.css'
+import { clearSession } from './utils/auth'
+
+// Remove bearer tokens persisted by versions prior to cookie-only sessions.
+clearSession()
 
 // Create a new router instance
 const router = createRouter({ routeTree })

@@ -1,6 +1,7 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import authRoutes from './api/auth.js';
@@ -19,6 +20,7 @@ export const app: Express = express();
 app.set('trust proxy', true);
 
 // Middleware
+app.use(helmet());
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true
@@ -26,10 +28,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-
-// Serve static files from uploads directory
-const uploadsPath = join(__dirname, '..', 'uploads');
-app.use('/uploads', express.static(uploadsPath));
 
 // In production, serve the frontend static files
 const distPath = join(__dirname, '..', 'dist');
@@ -55,8 +53,8 @@ if (process.env.NODE_ENV === 'production') {
     if (req.method !== 'GET') {
       return next();
     }
-    // Skip API routes, uploads, health check, and static assets
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/assets') || req.path === '/health') {
+    // Skip API routes, health check, and static assets
+    if (req.path.startsWith('/api') || req.path.startsWith('/assets') || req.path === '/health') {
       return next();
     }
     res.sendFile(join(distPath, 'index.html'));

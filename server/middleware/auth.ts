@@ -1,5 +1,6 @@
 import { type Request, type Response, type NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { prisma } from '../db.js';
 
 /**
  * Extended Request interface with user_id
@@ -13,6 +14,7 @@ export interface AuthRequest extends Request {
  */
 interface JWTPayload {
   user_id: string;
+  token_version: number;
   iat?: number;
   exp?: number;
 }
@@ -24,7 +26,7 @@ interface JWTPayload {
  * Attaches user_id to request object
  * Returns 401 Unauthorized if token invalid/expired
  */
-export function requireAuth(req: AuthRequest, res: Response, next: NextFunction): void {
+export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Extract token from Authorization header or cookie
     let token: string | undefined;
@@ -55,7 +57,22 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
     }
 
     try {
-      const decoded = jwt.verify(token, jwtSecret) as JWTPayload;
+      const decoded = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as JWTPayload;
+
+      if (!decoded.user_id || !Number.isInteger(decoded.token_version)) {
+        res.status(401).json({ error: 'Unauthorized: Invalid token payload' });
+        return;
+      }
+
+      const user = await prisma.users.findUnique({
+        where: { id: decoded.user_id },
+        select: { token_version: true },
+      });
+
+      if (!user || user.token_version !== decoded.token_version) {
+        res.status(401).json({ error: 'Unauthorized: Session revoked' });
+        return;
+      }
 
       // Attach user_id to request object
       req.user_id = decoded.user_id;

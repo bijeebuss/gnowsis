@@ -25,7 +25,7 @@ import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
 import { X, Upload, FileText, Image, Camera, RefreshCw, ArrowLeft } from 'lucide-react';
-import { getSession, clearSession, isAuthenticated } from '../utils/auth';
+import { clearSession } from '../utils/auth';
 
 interface UploadWidgetProps {
   isOpen: boolean;
@@ -92,19 +92,6 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
   const handleUpload = async () => {
     if (files.length === 0) {
       setUploadError('Please select at least one file');
-      return;
-    }
-
-    // Check if session is valid before upload
-    if (!isAuthenticated()) {
-      clearSession();
-      window.location.href = '/login';
-      return;
-    }
-
-    const token = getSession();
-    if (!token) {
-      setUploadError('Not authenticated');
       return;
     }
 
@@ -177,7 +164,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
 
     // Send request
     xhr.open('POST', '/api/documents/upload');
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.withCredentials = true;
     xhr.send(formData);
   };
 

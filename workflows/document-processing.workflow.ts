@@ -7,6 +7,7 @@ const {
   startOcrProcessing,
   extractTextFromPage,
   completeOcrProcessing,
+  failOcrProcessing,
   generateVectors,
   indexDocument,
 } = proxyActivities<typeof activities>({
@@ -65,10 +66,17 @@ export async function DocumentProcessingWorkflow(
   await startOcrProcessing(documentId);
 
   // Fan out: Process all pages in parallel for faster extraction
-  const textPagePromises = allImagePaths.map((imagePath, index) =>
-    extractTextFromPage(imagePath, index)
-  );
-  const textPages = await Promise.all(textPagePromises);
+  let textPages: Array<{ pageNumber: number; text: string }>;
+  try {
+    const textPagePromises = allImagePaths.map((imagePath, index) =>
+      extractTextFromPage(imagePath, index)
+    );
+    textPages = await Promise.all(textPagePromises);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown OCR extraction error';
+    await failOcrProcessing(documentId, message);
+    throw error;
+  }
 
   // Complete OCR processing (updates status)
   await completeOcrProcessing(documentId);

@@ -1,29 +1,7 @@
-/**
- * Hybrid vector search implementation
- * Combines dense (semantic) and sparse (keyword) search with weighted scoring
- */
-
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { pool } from '../db.js';
 import { generateDenseVector } from './embeddings.js';
-import { generateSparseVector, sparseDotProduct } from './sparse-vectors.js';
+import { generateSparseVector } from './sparse-vectors.js';
 
-// Create PostgreSQL connection pool
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_NAME || 'tldr',
-});
-
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
-
-/**
- * Search filters for refining results
- */
 export interface SearchFilters {
   date_from?: string;
   date_to?: string;
@@ -31,9 +9,6 @@ export interface SearchFilters {
   tags?: string[];
 }
 
-/**
- * Search result structure
- */
 export interface SearchResult {
   document_id: string;
   filename: string;
@@ -44,320 +19,179 @@ export interface SearchResult {
   page_number: number;
 }
 
-/**
- * Perform hybrid search combining dense and sparse vectors
- *
- * Scoring: 60% dense (semantic) + 40% sparse (keyword)
- * Groups results by document, returning only the highest-scoring page per document
- *
- * @param query - Search query text
- * @param userId - User ID for filtering results
- * @param filters - Optional filters for date range, document type, tags
- * @returns Array of search results (one per document) ranked by relevance score
- */
+export interface SearchPage {
+  results: SearchResult[];
+  total: number;
+}
+
+function appendFilters(filters: SearchFilters | undefined, params: unknown[], firstParameter: number): string {
+  let clause = '';
+  let parameter = firstParameter;
+  if (filters?.date_from) {
+    clause += ` AND d.upload_date >= $${parameter++}`;
+    params.push(new Date(filters.date_from));
+  }
+  if (filters?.date_to) {
+    const endExclusive = new Date(filters.date_to);
+    endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+    clause += ` AND d.upload_date < $${parameter++}`;
+    params.push(endExclusive);
+  }
+  if (filters?.document_type) {
+    clause += ` AND d.file_type = $${parameter++}`;
+    params.push(filters.document_type);
+  }
+  if (filters?.tags?.length) {
+    clause += ` AND EXISTS (
+      SELECT 1 FROM document_tags dt
+      WHERE dt.document_id = d.id AND dt.tag_id = ANY($${parameter++}::text[])
+    )`;
+    params.push(filters.tags);
+  }
+  return clause;
+}
+
 export async function hybridSearch(
   query: string,
   userId: string,
-  filters?: SearchFilters
-): Promise<SearchResult[]> {
-  // Generate query vectors
-  const queryDenseVector = await generateDenseVector(query);
-  const querySparseVector = generateSparseVector(query);
+  filters: SearchFilters | undefined,
+  page: number,
+  perPage: number,
+): Promise<SearchPage> {
+  const denseVector = await generateDenseVector(query, 'search_query');
+  const sparseVector = generateSparseVector(query);
+  const params: unknown[] = [`[${denseVector.join(',')}]`, userId, JSON.stringify(sparseVector)];
+  const filterClause = appendFilters(filters, params, 4);
+  const candidateParameter = params.length + 1;
+  const limitParameter = params.length + 2;
+  const offsetParameter = params.length + 3;
+  const candidateLimit = Math.max(1000, page * perPage * 20);
+  params.push(candidateLimit, perPage, (page - 1) * perPage);
 
-  // Format dense vector for pgvector: [val1,val2,val3,...]
-  const queryDenseVectorStr = `[${queryDenseVector.join(',')}]`;
-
-  // Build SQL query with filters
-  // Use window function to rank vectors within each document by dense distance
-  // This ensures we get the best match from each document before limiting
-  let sqlQuery = `
-    WITH ranked_vectors AS (
-      SELECT
-        v.id as vector_id,
-        v.document_id,
-        v.page_number,
-        v.text_content,
-        v.dense_vector,
-        v.sparse_vector,
-        d.filename,
-        d.original_filename,
-        d.upload_date,
-        d.file_type,
-        d.status,
-        (v.dense_vector <-> $1::vector) as dense_distance,
-        -- Rank vectors within each document by dense distance (best match = rank 1)
-        ROW_NUMBER() OVER (PARTITION BY v.document_id ORDER BY (v.dense_vector <-> $1::vector)) as rank
+  const sql = `
+    WITH candidate_vectors AS (
+      SELECT v.document_id, v.page_number, v.text_content, v.dense_vector, v.sparse_vector,
+             d.original_filename, d.upload_date, d.file_type
       FROM vectors v
-      INNER JOIN documents d ON v.document_id = d.id
-      WHERE d.user_id = $2
-        AND d.status = 'READY'
-  `;
-
-  const queryParams: any[] = [queryDenseVectorStr, userId];
-  let paramIndex = 3;
-
-  // Apply date filters
-  if (filters?.date_from) {
-    sqlQuery += ` AND d.upload_date >= $${paramIndex}`;
-    queryParams.push(new Date(filters.date_from));
-    paramIndex++;
-  }
-
-  if (filters?.date_to) {
-    sqlQuery += ` AND d.upload_date <= $${paramIndex}`;
-    queryParams.push(new Date(filters.date_to));
-    paramIndex++;
-  }
-
-  // Apply document type filter
-  if (filters?.document_type) {
-    sqlQuery += ` AND d.file_type = $${paramIndex}`;
-    queryParams.push(filters.document_type);
-    paramIndex++;
-  }
-
-  // Apply tag filter if provided
-  if (filters?.tags && filters.tags.length > 0) {
-    sqlQuery += `
-      AND d.id IN (
-        SELECT dt.document_id
-        FROM document_tags dt
-        INNER JOIN tags t ON dt.tag_id = t.id
-        WHERE t.name = ANY($${paramIndex})
-      )
-    `;
-    queryParams.push(filters.tags);
-    paramIndex++;
-  }
-
-  // Close the CTE and select only the top-ranked vector per document
-  sqlQuery += `
+      JOIN documents d ON d.id = v.document_id
+      WHERE d.user_id = $2 AND d.status = 'READY' AND v.dense_vector IS NOT NULL
+      ${filterClause}
+      ORDER BY v.dense_vector <=> $1::vector
+      LIMIT $${candidateParameter}
+    ), scored AS (
+      SELECT
+        v.document_id, v.page_number, v.text_content, v.original_filename,
+        v.upload_date, v.file_type,
+        GREATEST(0, 1 - (v.dense_vector <=> $1::vector)) AS dense_score,
+        COALESCE((
+          SELECT SUM((q.value #>> '{}')::double precision * (v.sparse_vector ->> q.key)::double precision)
+          FROM jsonb_each($3::jsonb) q
+          WHERE v.sparse_vector ? q.key
+        ), 0) AS sparse_raw
+      FROM candidate_vectors v
+    ), ranked AS (
+      SELECT *,
+        (0.6 * dense_score + 0.4 * (sparse_raw / (1 + sparse_raw))) AS relevance_score,
+        ROW_NUMBER() OVER (
+          PARTITION BY document_id
+          ORDER BY (0.6 * dense_score + 0.4 * (sparse_raw / (1 + sparse_raw))) DESC
+        ) AS page_rank
+      FROM scored
     )
-    SELECT
-      vector_id,
-      document_id,
-      page_number,
-      text_content,
-      dense_vector,
-      sparse_vector,
-      filename,
-      original_filename,
-      upload_date,
-      file_type,
-      status,
-      dense_distance,
-      sparse_vector as sparse_vec
-    FROM ranked_vectors
-    WHERE rank = 1
-    ORDER BY dense_distance
-    LIMIT 100
+    SELECT document_id, page_number, text_content, original_filename,
+           upload_date, file_type, relevance_score
+    FROM ranked
+    WHERE page_rank = 1
+    ORDER BY relevance_score DESC, upload_date DESC
+    LIMIT $${limitParameter} OFFSET $${offsetParameter}
   `;
 
-  // Execute query
-  const rawResults = await pool.query(sqlQuery, queryParams);
+  const countParams: unknown[] = [userId];
+  const countFilters = appendFilters(filters, countParams, 2);
+  const [rows, count] = await Promise.all([
+    pool.query(sql, params),
+    pool.query(
+      `SELECT COUNT(DISTINCT d.id) AS total
+       FROM documents d JOIN vectors v ON v.document_id = d.id
+       WHERE d.user_id = $1 AND d.status = 'READY' AND v.dense_vector IS NOT NULL ${countFilters}`,
+      countParams,
+    ),
+  ]);
 
-  // Calculate hybrid scores (SQL already gives us one result per document)
-  const results: SearchResult[] = rawResults.rows.map((row) => {
-    // Dense score: convert distance to similarity (1 - normalized_distance)
-    // pgvector L2 distance is >= 0, normalize to [0, 1]
-    const denseDistance = parseFloat(row.dense_distance);
-    const denseScore = Math.max(0, 1 - denseDistance / 2); // Normalize assuming max distance ~2
-
-    // Sparse score: calculate dot product between query and document sparse vectors
-    const docSparseVector = row.sparse_vec as { [token: string]: number };
-    const sparseScore = sparseDotProduct(querySparseVector, docSparseVector);
-
-    // Hybrid score: 60% dense + 40% sparse
-    const hybridScore = 0.6 * denseScore + 0.4 * sparseScore;
-
-    // Extract snippet
-    const snippet = extractSnippet(row.text_content, query);
-
-    return {
+  return {
+    results: rows.rows.map(row => ({
       document_id: row.document_id,
       filename: row.original_filename,
       upload_date: row.upload_date,
       file_type: row.file_type,
-      relevance_score: hybridScore,
-      snippet: snippet,
+      relevance_score: Number(row.relevance_score),
+      snippet: extractSnippet(row.text_content, query),
       page_number: row.page_number,
-    };
-  });
-
-  // Sort by hybrid relevance score (highest first)
-  results.sort((a, b) => b.relevance_score - a.relevance_score);
-
-  return results;
+    })),
+    total: Number(count.rows[0]?.total ?? 0),
+  };
 }
 
-/**
- * Extract a text snippet around the query terms with context
- *
- * Returns up to 150 characters before and after the first match.
- *
- * @param fullText - Full text content
- * @param query - Search query
- * @returns Snippet with context around query match
- */
 export function extractSnippet(fullText: string, query: string): string {
-  const snippetRadius = 150; // Characters before and after match
-
-  // Normalize for searching
-  const normalizedText = fullText;
-  const normalizedQuery = query.toLowerCase();
-
-  // Split query into terms
-  const queryTerms = normalizedQuery.match(/\b\w+\b/g) || [];
-
-  if (queryTerms.length === 0 || !fullText) {
-    // No query terms or empty text, return beginning of text
-    return fullText.substring(0, snippetRadius * 2) + (fullText.length > snippetRadius * 2 ? '...' : '');
+  const radius = 150;
+  const terms = query.toLowerCase().match(/\b\w+\b/g) || [];
+  if (!fullText || terms.length === 0) {
+    return fullText.substring(0, radius * 2) + (fullText.length > radius * 2 ? '...' : '');
   }
-
-  // Find first occurrence of any query term
-  let matchPosition = -1;
+  const lowerText = fullText.toLowerCase();
+  let position = -1;
   let matchLength = 0;
-
-  for (const term of queryTerms) {
-    const position = normalizedText.toLowerCase().indexOf(term);
-    if (position !== -1 && (matchPosition === -1 || position < matchPosition)) {
-      matchPosition = position;
+  for (const term of terms) {
+    const candidate = lowerText.indexOf(term);
+    if (candidate !== -1 && (position === -1 || candidate < position)) {
+      position = candidate;
       matchLength = term.length;
     }
   }
-
-  // If no match found, return beginning of text
-  if (matchPosition === -1) {
-    return fullText.substring(0, snippetRadius * 2) + (fullText.length > snippetRadius * 2 ? '...' : '');
+  if (position === -1) {
+    return fullText.substring(0, radius * 2) + (fullText.length > radius * 2 ? '...' : '');
   }
-
-  // Calculate snippet boundaries
-  const snippetStart = Math.max(0, matchPosition - snippetRadius);
-  const snippetEnd = Math.min(fullText.length, matchPosition + matchLength + snippetRadius);
-
-  // Extract snippet
-  let snippet = fullText.substring(snippetStart, snippetEnd);
-
-  // Add ellipsis if truncated
-  if (snippetStart > 0) {
-    snippet = '...' + snippet;
-  }
-  if (snippetEnd < fullText.length) {
-    snippet = snippet + '...';
-  }
-
-  return snippet.trim();
+  const start = Math.max(0, position - radius);
+  const end = Math.min(fullText.length, position + matchLength + radius);
+  return `${start > 0 ? '...' : ''}${fullText.substring(start, end)}${end < fullText.length ? '...' : ''}`.trim();
 }
 
-/**
- * Get total count of search results (for pagination)
- *
- * @param query - Search query text
- * @param userId - User ID for filtering results
- * @param filters - Optional filters
- * @returns Total count of matching documents
- */
-export async function getSearchResultCount(
-  query: string,
-  userId: string,
-  filters?: SearchFilters
-): Promise<number> {
-  // Build count query
-  let sqlQuery = `
-    SELECT COUNT(DISTINCT v.document_id) as total
-    FROM vectors v
-    INNER JOIN documents d ON v.document_id = d.id
-    WHERE d.user_id = $1
-      AND d.status = 'READY'
-  `;
-
-  const queryParams: any[] = [userId];
-  let paramIndex = 2;
-
-  // Apply filters (same as main search)
-  if (filters?.date_from) {
-    sqlQuery += ` AND d.upload_date >= $${paramIndex}`;
-    queryParams.push(new Date(filters.date_from));
-    paramIndex++;
-  }
-
-  if (filters?.date_to) {
-    sqlQuery += ` AND d.upload_date <= $${paramIndex}`;
-    queryParams.push(new Date(filters.date_to));
-    paramIndex++;
-  }
-
-  if (filters?.document_type) {
-    sqlQuery += ` AND d.file_type = $${paramIndex}`;
-    queryParams.push(filters.document_type);
-    paramIndex++;
-  }
-
-  if (filters?.tags && filters.tags.length > 0) {
-    sqlQuery += `
-      AND d.id IN (
-        SELECT dt.document_id
-        FROM document_tags dt
-        INNER JOIN tags t ON dt.tag_id = t.id
-        WHERE t.name = ANY($${paramIndex})
-      )
-    `;
-    queryParams.push(filters.tags);
-    paramIndex++;
-  }
-
-  const result = await pool.query(sqlQuery, queryParams);
-  return parseInt(result.rows[0].total) || 0;
-}
-
-/**
- * Update or create the metadata vector (page -1) for a document
- * This stores title and notes for searchability
- *
- * @param documentId - Document UUID
- * @param title - Document title (optional)
- * @param notes - Document notes (optional)
- */
-export async function updateMetadataVector(
+export async function updateDocumentMetadata(
   documentId: string,
   title?: string | null,
-  notes?: string | null
+  notes?: string | null,
 ): Promise<void> {
-  // Build metadata text from title and notes
-  const metadataText: string[] = [];
-
-  if (title && title.trim()) {
-    metadataText.push(`Title: ${title.trim()}`);
-  }
-
-  if (notes && notes.trim()) {
-    metadataText.push(`Notes: ${notes.trim()}`);
-  }
-
-  // Delete existing page -1 vector
-  await pool.query(
-    `DELETE FROM vectors WHERE document_id = $1::uuid AND page_number = -1`,
-    [documentId]
-  );
-
-  // If we have metadata to index, create new vector
-  if (metadataText.length > 0) {
-    const text = metadataText.join('\n\n');
-
-    // Generate vectors
-    const denseVector = await generateDenseVector(text);
-    const sparseVector = generateSparseVector(text);
-
-    // Format dense vector for pgvector
-    const denseVectorStr = `[${denseVector.join(',')}]`;
-
-    // Insert new vector
-    await pool.query(
-      `INSERT INTO vectors (id, document_id, page_number, dense_vector, sparse_vector, text_content)
-       VALUES (gen_random_uuid(), $1::uuid, -1, $2::vector, $3::jsonb, $4)`,
-      [documentId, denseVectorStr, JSON.stringify(sparseVector), text]
+  const parts: string[] = [];
+  if (title?.trim()) parts.push(`Title: ${title.trim()}`);
+  if (notes?.trim()) parts.push(`Notes: ${notes.trim()}`);
+  const text = parts.join('\n\n');
+  const denseVector = text ? await generateDenseVector(text) : null;
+  const sparseVector = text ? generateSparseVector(text) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE documents SET title = $2, notes = $3, updated_at = NOW() WHERE id = $1',
+      [documentId, title ?? null, notes ?? null],
     );
+    if (!text || !denseVector || !sparseVector) {
+      await client.query('DELETE FROM vectors WHERE document_id = $1 AND page_number = -1', [documentId]);
+    } else {
+      await client.query(
+        `INSERT INTO vectors (id, document_id, page_number, dense_vector, sparse_vector, text_content)
+         VALUES (gen_random_uuid()::text, $1, -1, $2::vector, $3::jsonb, $4)
+         ON CONFLICT (document_id, page_number) DO UPDATE SET
+           dense_vector = EXCLUDED.dense_vector,
+           sparse_vector = EXCLUDED.sparse_vector,
+           text_content = EXCLUDED.text_content`,
+        [documentId, `[${denseVector.join(',')}]`, JSON.stringify(sparseVector), text],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
-
-export { prisma, pool };
