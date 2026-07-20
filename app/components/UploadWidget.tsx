@@ -190,6 +190,20 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
     if (e.target.files && e.target.files.length > 0) {
       addFiles(e.target.files);
     }
+
+    // Allow a file to be selected again after it has been removed.
+    e.target.value = '';
+  };
+
+  const handleChooseFiles = () => {
+    if (isUploading) return;
+
+    if (captureMode !== 'upload') {
+      handleModeChange('upload');
+    }
+
+    // Keep this synchronous with the user's click so mobile browsers allow it.
+    fileInputRef.current?.click();
   };
 
   const handleClose = () => {
@@ -214,6 +228,9 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
     setUploadError(null);
     setUploadSuccess(false);
     xhrRef.current = null;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
 
     // Reset camera state
     setCaptureMode('upload');
@@ -444,7 +461,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
           <div className="flex gap-2">
             <Button
               variant={captureMode === 'upload' ? 'default' : 'outline'}
-              onClick={() => handleModeChange('upload')}
+              onClick={handleChooseFiles}
               disabled={isUploading}
               className="flex-1"
             >
@@ -462,6 +479,17 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
             </Button>
           </div>
 
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".pdf,.png,.jpg,.jpeg"
+            onChange={handleFileSelect}
+            className="sr-only"
+            tabIndex={-1}
+            disabled={isUploading}
+          />
+
           {/* Upload Mode: Drag and Drop Zone */}
           {captureMode === 'upload' && (
             <div
@@ -471,22 +499,13 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              onClick={() => !isUploading && fileInputRef.current?.click()}
+              onClick={handleChooseFiles}
             >
               <Upload className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground mb-1">
                 Drag and drop files here, or click to browse
               </p>
               <p className="text-xs text-muted-foreground">PDF, PNG, JPG up to 1GB each</p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.png,.jpg,.jpeg"
-                onChange={handleFileSelect}
-                className="hidden"
-                disabled={isUploading}
-              />
             </div>
           )}
 
