@@ -96,7 +96,11 @@ export async function getUserEmails(userId: string): Promise<EmailBatch> {
       const emailsToProcess: EmailToProcess[] = [];
 
       try {
-        const messages = client.fetch(searchCriteria, { uid: true, envelope: true });
+        const messages = client.fetch(
+          searchCriteria,
+          { uid: true, envelope: true },
+          { uid: true },
+        );
 
         for await (const message of messages) {
           // Only include messages with UID greater than last_uid
@@ -180,12 +184,16 @@ export async function fetchEmailHtml(
     const lock = await client.getMailboxLock(user.imap_folder || 'INBOX');
 
     try {
-      const messages = client.fetch(String(uid), {
-        uid: true,
-        bodyStructure: true,
-        envelope: true,
-        source: true
-      });
+      const messages = client.fetch(
+        String(uid),
+        {
+          uid: true,
+          bodyStructure: true,
+          envelope: true,
+          source: true,
+        },
+        { uid: true },
+      );
 
       let htmlContent = '';
       let metadata: EmailMetadata = { from: '', to: '', cc: '' };

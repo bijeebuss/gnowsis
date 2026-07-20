@@ -448,33 +448,33 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
   return (
     <>
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-2xl flex-col gap-0 overflow-hidden rounded-lg p-0 sm:max-h-[90vh] sm:gap-4 sm:p-6">
+        <DialogHeader className="shrink-0 px-4 pb-3 pt-4 pr-12 text-left sm:p-0">
           <DialogTitle>Upload Document</DialogTitle>
           <DialogDescription>
             Upload files or capture photos to create a single searchable document.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 overflow-y-auto flex-1">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-4 sm:space-y-4 sm:p-0">
           {/* Mode Toggle */}
           <div className="flex gap-2">
             <Button
               variant={captureMode === 'upload' ? 'default' : 'outline'}
               onClick={handleChooseFiles}
               disabled={isUploading}
-              className="flex-1"
+              className="min-w-0 flex-1 px-3"
             >
-              <Upload className="w-4 h-4 mr-2" />
+              <Upload className="w-4 h-4" />
               Upload Files
             </Button>
             <Button
               variant={captureMode === 'camera' ? 'default' : 'outline'}
               onClick={() => handleModeChange('camera')}
               disabled={isUploading}
-              className="flex-1"
+              className="min-w-0 flex-1 px-3"
             >
-              <Camera className="w-4 h-4 mr-2" />
+              <Camera className="w-4 h-4" />
               Camera
             </Button>
           </div>
@@ -493,7 +493,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
           {/* Upload Mode: Drag and Drop Zone */}
           {captureMode === 'upload' && (
             <div
-              className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+              className={`border-2 border-dashed rounded-lg p-4 text-center transition-colors sm:p-6 ${
                 isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'
               } ${isUploading ? 'pointer-events-none opacity-50' : 'cursor-pointer'}`}
               onDragOver={handleDragOver}
@@ -501,7 +501,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
               onDrop={handleDrop}
               onClick={handleChooseFiles}
             >
-              <Upload className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+              <Upload className="mb-2 h-8 w-8 mx-auto text-muted-foreground sm:mb-3 sm:h-10 sm:w-10" />
               <p className="text-sm text-muted-foreground mb-1">
                 Drag and drop files here, or click to browse
               </p>
@@ -516,7 +516,7 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
               <Label>Selected Files ({files.length})</Label>
               <div className="max-h-32 overflow-y-auto space-y-2">
                 {files.map((file, index) => (
-                  <div key={`${file.name}-${index}`} className="flex items-center justify-between border rounded p-2">
+                  <div key={`${file.name}-${index}`} className="flex items-center justify-between gap-2 border rounded p-2">
                     <div className="flex items-center gap-2 flex-1 min-w-0">
                       {getFileIcon(file.type)}
                       <span className="text-sm truncate">{file.name}</span>
@@ -526,6 +526,8 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
                         size="sm"
                         variant="ghost"
                         onClick={() => removeFile(index)}
+                        className="h-9 w-9 shrink-0 p-0"
+                        aria-label={`Remove ${file.name}`}
                       >
                         <X className="w-4 h-4" />
                       </Button>
@@ -608,17 +610,19 @@ export function UploadWidget({ isOpen, onClose, onUploadComplete }: UploadWidget
         </div>
 
         {/* Action Buttons */}
-        <div className="flex justify-end gap-2 pt-4 border-t">
+        <div className="flex shrink-0 gap-2 border-t p-4 sm:justify-end sm:p-0 sm:pt-4">
           <Button
             variant="outline"
             onClick={handleClose}
             disabled={isUploading}
+            className="flex-1 sm:flex-none"
           >
             Cancel
           </Button>
           <Button
             onClick={handleUpload}
             disabled={isUploading || files.length === 0}
+            className="flex-1 sm:flex-none"
           >
             {isUploading ? 'Uploading...' : 'Upload'}
           </Button>

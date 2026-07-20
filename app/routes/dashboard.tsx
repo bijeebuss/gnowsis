@@ -353,26 +353,29 @@ function DashboardPage() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="bg-card border-b">
-        <div className="container mx-auto px-4 py-6">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="container mx-auto px-4 py-4 sm:py-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
+              <h1 className="text-2xl font-bold text-foreground sm:text-3xl">Dashboard</h1>
               <p className="text-muted-foreground mt-1">
                 {totalDocuments} {totalDocuments === 1 ? 'document' : 'documents'} • {formatFileSize(totalStorage)}
               </p>
             </div>
-            <div className="flex gap-2">
-              <Link to="/settings">
-                <Button variant="outline">
+            <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto">
+              <Link to="/settings" className="min-w-0">
+                <Button variant="outline" className="w-full md:w-auto">
                   <Settings className="w-4 h-4 mr-2" />
                   Settings
                 </Button>
               </Link>
-              <Button variant="outline" onClick={() => void logout()}>
+              <Button variant="outline" onClick={() => void logout()} className="min-w-0 w-full md:w-auto">
                 <LogOut className="w-4 h-4 mr-2" />
                 Sign out
               </Button>
-              <Button onClick={() => setIsUploadOpen(true)}>
+              <Button
+                onClick={() => setIsUploadOpen(true)}
+                className="col-span-2 w-full md:w-auto"
+              >
                 <Upload className="w-4 h-4 mr-2" />
                 Upload Document
               </Button>
@@ -382,14 +385,14 @@ function DashboardPage() {
       </div>
 
       {/* Main Content */}
-      <div className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-3 py-4 sm:px-4 sm:py-8">
         {/* Search Section */}
-        <Card className="mb-6">
-          <CardContent className="pt-6">
-            <div className="space-y-4">
+        <Card className="mb-4 sm:mb-6">
+          <CardContent className="p-3 sm:p-6">
+            <div className="space-y-3 sm:space-y-4">
               {/* Search Input */}
-              <div className="flex gap-2">
-                <div className="flex-1 relative">
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="relative min-w-0">
                   <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
                     type="text"
@@ -401,36 +404,50 @@ function DashboardPage() {
                         handleSearch();
                       }
                     }}
-                    className="pl-10"
+                    className="h-11 pl-10"
                   />
                 </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setShowFilters(!showFilters)}
-                >
-                  <Filter className="w-4 h-4 mr-2" />
-                  Filters
-                  <ChevronDown className={`w-4 h-4 ml-2 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
-                </Button>
-                <Button onClick={handleSearch} disabled={isSearching}>
-                  {isSearching ? 'Searching...' : 'Search'}
-                </Button>
-                {isSearchMode && (
-                  <Button variant="ghost" onClick={handleClearSearch}>
-                    <X className="w-4 h-4 mr-2" />
-                    Clear
+                <div className="flex w-full gap-2">
+                  <Button
+                    onClick={handleSearch}
+                    disabled={isSearching}
+                    className="min-w-0 flex-1 px-3 sm:flex-none sm:px-4"
+                  >
+                    {isSearching ? 'Searching...' : 'Search'}
                   </Button>
-                )}
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowFilters(!showFilters)}
+                    aria-expanded={showFilters}
+                    className="min-w-0 flex-1 px-3 sm:flex-none sm:px-4"
+                  >
+                    <Filter className="w-4 h-4" />
+                    Filters
+                    <ChevronDown className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
+                  </Button>
+                  {isSearchMode && (
+                    <Button
+                      variant="ghost"
+                      onClick={handleClearSearch}
+                      className="h-10 w-10 shrink-0 px-0 sm:w-auto sm:px-4"
+                      aria-label="Clear search"
+                      title="Clear search"
+                    >
+                      <X className="w-4 h-4" />
+                      <span className="sr-only sm:not-sr-only">Clear</span>
+                    </Button>
+                  )}
+                </div>
               </div>
 
               {/* Filters Panel */}
               {showFilters && (
-                <div className="border-t pt-4 space-y-4">
+                <div className="border-t pt-3 space-y-3 sm:pt-4 sm:space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {/* Date Range */}
                     <div className="space-y-2">
                       <Label>Date Range</Label>
-                      <div className="flex gap-2">
+                      <div className="grid grid-cols-1 gap-2 min-[440px]:grid-cols-2">
                         <Input
                           type="date"
                           value={dateFrom}
@@ -484,10 +501,10 @@ function DashboardPage() {
 
         {/* Controls */}
         {!isSearchMode && (
-          <div className="flex justify-between items-center mb-6">
+          <div className="mb-4 flex items-center justify-between gap-2 sm:mb-6">
             <h2 className="text-lg font-semibold text-foreground">Your Documents</h2>
             <Select onValueChange={handleSortChange} defaultValue="newest">
-              <SelectTrigger className="w-48">
+              <SelectTrigger className="w-36 shrink-0 sm:w-48">
                 <SelectValue placeholder="Sort by" />
               </SelectTrigger>
               <SelectContent>
@@ -531,9 +548,9 @@ function DashboardPage() {
         {isSearchMode && (
           <>
             {searchResults.length === 0 && !isSearching && (
-              <Card className="text-center py-12">
-                <CardContent className="pt-6">
-                  <Search className="w-16 h-16 mx-auto text-muted-foreground mb-4" />
+              <Card className="text-center py-8 sm:py-12">
+                <CardContent className="px-4 pt-4 sm:px-6 sm:pt-6">
+                  <Search className="w-12 h-12 mx-auto text-muted-foreground mb-3 sm:h-16 sm:w-16 sm:mb-4" />
                   <h3 className="text-xl font-semibold text-foreground mb-2">
                     No results found
                   </h3>
@@ -555,11 +572,11 @@ function DashboardPage() {
                       params={{ id: result.document_id }}
                     >
                       <Card className="hover:shadow-lg transition-shadow">
-                        <CardHeader>
+                        <CardHeader className="p-4 sm:p-6">
                           <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <CardTitle className="text-lg">{result.filename}</CardTitle>
-                              <CardDescription className="flex items-center gap-4 mt-2">
+                            <div className="min-w-0 flex-1">
+                              <CardTitle className="truncate text-lg" title={result.filename}>{result.filename}</CardTitle>
+                              <CardDescription className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <span>{formatDate(result.upload_date)}</span>
                                 <span>•</span>
                                 <span>{result.page_number < 0 ? 'Title / notes' : `Page ${result.page_number + 1}`}</span>
@@ -572,7 +589,7 @@ function DashboardPage() {
                             </div>
                           </div>
                         </CardHeader>
-                        <CardContent>
+                        <CardContent className="px-4 pb-4 sm:px-6 sm:pb-6">
                           <div className="bg-muted rounded p-3 text-sm">
                             <p className="text-foreground line-clamp-3">{result.snippet}</p>
                           </div>
@@ -597,9 +614,9 @@ function DashboardPage() {
 
         {/* Empty State */}
         {!isLoading && !isSearchMode && documents.length === 0 && (
-          <Card className="text-center py-12">
-            <CardContent className="pt-6">
-              <FileText className="w-16 h-16 mx-auto text-muted-foreground mb-4" />
+          <Card className="text-center py-8 sm:py-12">
+            <CardContent className="px-4 pt-4 sm:px-6 sm:pt-6">
+              <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-3 sm:h-16 sm:w-16 sm:mb-4" />
               <h3 className="text-xl font-semibold text-foreground mb-2">
                 No documents yet
               </h3>
@@ -617,7 +634,7 @@ function DashboardPage() {
         {/* Document Grid */}
         {!isLoading && !isSearchMode && documents.length > 0 && (
           <>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3 xl:grid-cols-4">
               {documents.map((doc) => (
                 <Link
                   key={doc.id}
@@ -626,9 +643,9 @@ function DashboardPage() {
                   className="block"
                 >
                   <Card className="hover:shadow-lg transition-shadow h-full">
-                    <CardHeader>
+                    <CardHeader className="p-4 sm:p-6">
                       {/* Thumbnail */}
-                      <div className="w-full h-40 bg-muted rounded-md flex items-center justify-center mb-3 overflow-hidden">
+                      <div className="flex h-32 w-full items-center justify-center overflow-hidden rounded-md bg-muted sm:h-40">
                         <img
                           src={`/api/documents/${doc.id}/pages/0`}
                           alt={doc.filename}
@@ -649,7 +666,7 @@ function DashboardPage() {
                         {getStatusBadge(doc.status)}
                       </CardDescription>
                     </CardHeader>
-                    <CardContent>
+                    <CardContent className="px-4 pb-4 sm:px-6 sm:pb-6">
                       <div className="flex items-center justify-between">
                         <div className="text-xs text-muted-foreground">
                           {formatFileSize(doc.file_size)}
@@ -685,31 +702,33 @@ function DashboardPage() {
 
             {/* Pagination Controls */}
             {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-4 mt-8">
+              <div className="mt-6 flex items-center justify-center gap-2 sm:mt-8 sm:gap-4">
                 <Button
                   variant="outline"
                   onClick={() => setPage(p => Math.max(1, p - 1))}
                   disabled={page === 1}
+                  className="px-3 sm:px-4"
                 >
-                  <ChevronLeft className="w-4 h-4 mr-1" />
+                  <ChevronLeft className="w-4 h-4" />
                   Previous
                 </Button>
-                <span className="text-sm text-muted-foreground">
+                <span className="whitespace-nowrap text-xs text-muted-foreground sm:text-sm">
                   Page {page} of {totalPages}
                 </span>
                 <Button
                   variant="outline"
                   onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
+                  className="px-3 sm:px-4"
                 >
                   Next
-                  <ChevronRight className="w-4 h-4 ml-1" />
+                  <ChevronRight className="w-4 h-4" />
                 </Button>
               </div>
             )}
           </>
         )}
-      </div>
+      </main>
 
       {/* Upload Widget */}
       <UploadWidget
